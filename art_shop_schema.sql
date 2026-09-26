@@ -7,6 +7,13 @@
 --   * No customer accounts — checkout is guest-only, orders store
 --     contact/shipping info directly. `customers` is optional and only
 --     used to recognize repeat buyers by email.
+--   * i18n: `locales` is a table, not an enum, so new languages are a
+--     row insert, not a migration. Only editorial copy that actually
+--     varies by language is translated (product description, category
+--     name/description); product title, slugs, and everything else
+--     stay single-valued. A translation missing for a locale should
+--     fall back to the default locale (`locales.is_default`) at the
+--     application layer — the schema doesn't enforce completeness.
 -- =====================================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- gen_random_uuid()
@@ -17,6 +24,7 @@ CREATE EXTENSION IF NOT EXISTS citext;    -- case-insensitive email
 CREATE TYPE product_status AS ENUM ('draft', 'published', 'reserved', 'sold', 'archived');
 CREATE TYPE order_status   AS ENUM ('pending', 'paid', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded');
 CREATE TYPE payment_status AS ENUM ('pending', 'authorized', 'captured', 'failed', 'refunded', 'partially_refunded');
+CREATE TYPE return_status  AS ENUM ('requested', 'approved', 'rejected', 'received', 'refunded');
 
 -- ========================= ADMIN =========================
 -- Only ever one row in practice, but modeled as a table so you can
@@ -31,25 +39,58 @@ CREATE TABLE admins (
     last_login_at TIMESTAMPTZ
 );
 
+-- ========================= LOCALES (i18n) =========================
+-- Supported languages. A table, not an enum, so adding a language is
+-- an INSERT, not a migration. Exactly one row should have
+-- is_default = true — the fallback when a translation row is missing.
+
+CREATE TABLE locales (
+    code       TEXT PRIMARY KEY,   -- ISO 639-1, e.g. 'en', 'es', 'de', 'fr'
+    name       TEXT NOT NULL,      -- e.g. 'English'
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    is_active  BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- at most one default locale
+CREATE UNIQUE INDEX idx_one_default_locale ON locales(is_default) WHERE is_default;
+
+INSERT INTO locales (code, name, is_default) VALUES
+    ('en', 'English', true),
+    ('es', 'Spanish', false),
+    ('de', 'German',  false),
+    ('fr', 'French',  false);
+
 -- ========================= CATEGORIES =========================
+-- name/description are translated (see category_translations); slug
+-- stays a single language-neutral URL segment.
 
 CREATE TABLE categories (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL,
     slug        TEXT NOT NULL UNIQUE,
     parent_id   UUID REFERENCES categories(id) ON DELETE SET NULL,
-    description TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE category_translations (
+    category_id  UUID NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    locale_code  TEXT NOT NULL REFERENCES locales(code) ON DELETE RESTRICT,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    PRIMARY KEY (category_id, locale_code)
+);
+
+CREATE INDEX idx_category_translations_locale ON category_translations(locale_code);
+
 -- ========================= PRODUCTS =========================
+-- title stays a single fixed value (an artwork's title generally isn't
+-- translated); description is translated (see product_translations).
 
 CREATE TABLE products (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     sku                 TEXT UNIQUE,
     slug                TEXT NOT NULL UNIQUE,
     title               TEXT NOT NULL,
-    description         TEXT,
     medium              TEXT,               -- e.g. "Oil on canvas"
     style               TEXT,               -- e.g. "Abstract", "Impressionist"
     year_created        INT,
@@ -74,6 +115,15 @@ CREATE INDEX idx_products_status       ON products(status);
 CREATE INDEX idx_products_category     ON products(category_id);
 CREATE INDEX idx_products_tags         ON products USING gin (tags);
 
+CREATE TABLE product_translations (
+    product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    locale_code  TEXT NOT NULL REFERENCES locales(code) ON DELETE RESTRICT,
+    description  TEXT,
+    PRIMARY KEY (product_id, locale_code)
+);
+
+CREATE INDEX idx_product_translations_locale ON product_translations(locale_code);
+
 -- ========================= PRODUCT IMAGES =========================
 
 CREATE TABLE product_images (
@@ -91,6 +141,32 @@ CREATE UNIQUE INDEX idx_one_primary_image_per_product
     ON product_images(product_id) WHERE is_primary;
 
 CREATE INDEX idx_product_images_product ON product_images(product_id);
+
+-- ========================= STATIC PAGES (CMS-lite) =========================
+-- Editable, translated long-form content that isn't tied to a product or
+-- category — About Me, Privacy Policy, Terms, Shipping & Returns, etc.
+-- Edited from the admin panel, same pattern as product/category
+-- translations, so no code change/redeploy is needed to update copy.
+
+CREATE TABLE pages (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug        TEXT NOT NULL UNIQUE,   -- e.g. 'about', 'privacy-policy', 'terms', 'shipping-returns'
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE page_translations (
+    page_id      UUID NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    locale_code  TEXT NOT NULL REFERENCES locales(code) ON DELETE RESTRICT,
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL,   -- markdown or HTML, rendered as-is by the frontend
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (page_id, locale_code)
+);
+
+CREATE INDEX idx_page_translations_locale ON page_translations(locale_code);
+
+-- updated_at trigger for this table is created later, alongside
+-- set_updated_at() (see the updated_at TRIGGER section at the bottom).
 
 -- ========================= CUSTOMERS (optional) =========================
 -- No password, no login. Just lets you group orders by email if the
@@ -146,6 +222,33 @@ CREATE TABLE order_items (
 
 CREATE INDEX idx_order_items_order   ON order_items(order_id);
 CREATE INDEX idx_order_items_product ON order_items(product_id);
+
+-- ========================= RETURNS =========================
+-- One row per returned line item (an order with multiple items gets
+-- one returns row per item actually being returned). Tracks the
+-- admin workflow (requested -> approved/rejected -> received ->
+-- refunded) and what happens to the physical piece afterward —
+-- relevant since most items are one-of-a-kind originals, not
+-- restockable SKUs. EU buyers generally have a 14-day statutory
+-- right of withdrawal on distance sales; this isn't just a courtesy
+-- return policy.
+
+CREATE TABLE returns (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id              UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    order_item_id         UUID NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+    status                return_status NOT NULL DEFAULT 'requested',
+    reason                TEXT,                 -- buyer-stated reason
+    admin_notes           TEXT,
+    product_disposition   TEXT CHECK (product_disposition IN ('pending', 'relisted', 'archived_damaged')) NOT NULL DEFAULT 'pending',
+    provider_refund_id    TEXT,                 -- e.g. Stripe refund ID, once refunded
+    refund_amount_cents   BIGINT,
+    requested_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at           TIMESTAMPTZ            -- set when status reaches 'rejected' or 'refunded'
+);
+
+CREATE INDEX idx_returns_order  ON returns(order_id);
+CREATE INDEX idx_returns_status ON returns(status);
 
 -- ========================= PAYMENTS =========================
 
@@ -226,6 +329,10 @@ CREATE TRIGGER trg_products_updated_at
 
 CREATE TRIGGER trg_orders_updated_at
     BEFORE UPDATE ON orders
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_page_translations_updated_at
+    BEFORE UPDATE ON page_translations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- =====================================================================
