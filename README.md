@@ -10,6 +10,22 @@ This README doubles as the planning document for the project. It describes what 
 - The **shop is an optional layer on top**, controlled by a feature flag. When it's off, the site behaves as a pure portfolio. When it's on, the same artwork listings become purchasable.
 - Data model, routes, and UI should be built so the shop can be toggled without structural rework later — not bolted on as an afterthought.
 
+## Tech stack
+
+Decoupled frontend/backend, communicating over a REST/JSON API.
+
+| Layer | Choice | Why |
+|---|---|---|
+| **Frontend** | **Next.js** (React) — frontend only, no Next API routes | Needed for SEO on the public gallery/artwork pages: SSG/ISR serves fully-rendered HTML to crawlers (important for search + social-share previews), unlike a plain client-rendered SPA. All data comes from the NestJS API rather than Next's own backend features. |
+| **Backend** | **NestJS** (Node.js) | Structured, modular API (controllers/services/DI) — a good fit for the order/payment/admin logic in the schema. Runs as an independently deployable/scalable service from the frontend. |
+| **Database** | **PostgreSQL 14+** (managed — e.g. Neon or Supabase) | Matches [art_shop_schema.sql](art_shop_schema.sql). Managed hosting avoids running/patching a DB server ourselves; a single shared instance is required once the app scales horizontally (see below). |
+| **Image storage** | **Cloudflare R2** | See [Open questions](#open-questions) — cheap at this scale, free egress. |
+| **Payments** | **Stripe** | See [Payments](#payments). |
+
+Notes:
+- Both Next.js and NestJS are stateless per-request (no in-memory session state), so either can be scaled horizontally behind a load balancer independently of the other. Cart/session state lives in the DB/cookies (`cart_items.session_id`), not in server memory, so any backend instance can serve any request.
+- Being decoupled, CORS and API authentication (for the admin panel) need explicit setup between the two apps — this doesn't come for free the way it would in a single Next.js full-stack app.
+
 ## Feature flag: `SHOP_ENABLED`
 
 A single flag gates all shop functionality.
@@ -20,7 +36,7 @@ A single flag gates all shop functionality.
 | `SHOP_ENABLED = true` | Full shop surfaces: prices shown, cart, checkout, order confirmation, payment flow. |
 
 Requirements for the flag:
-- Must be checkable both **server-side** (to block shop routes/APIs entirely, not just hide UI) and **client-side** (to conditionally render shop UI).
+- Must be checkable in **both apps**: NestJS (to reject shop endpoints — cart, checkout, orders — entirely, not just hide UI) and Next.js (to conditionally render shop UI/pages). A single source of truth (e.g. a config table or flag service both apps read) avoids the two getting out of sync.
 - Toggling it must not require a data migration — `products`, `categories`, etc. exist and are populated regardless of flag state; the flag only controls whether purchase-related UI/endpoints are reachable.
 - Disabling the shop after it's been live must not delete or corrupt orders/payments history — it only hides the buying flow going forward.
 - Exact mechanism (env var, config table, LaunchDarkly-style service) is TBD — see [Open questions](#open-questions).
@@ -31,7 +47,7 @@ Full definitions in [art_shop_schema.sql](art_shop_schema.sql). PostgreSQL 14+.
 
 - **admins** — single admin account (no roles/permissions layer needed).
 - **categories** — hierarchical (self-referencing `parent_id`) for organizing artwork.
-- **products** — the artworks. Mostly one-of-a-kind (`is_unique = true`, capped at qty 1); supports editions/prints via `is_unique = false` with `quantity_available > 1`. Lifecycle: `draft → published → reserved → sold` / `archived`.
+- **products** — the artworks (single-artist site — no `artist_name` column; artist bio/info lives site-wide, not per-product). Mostly one-of-a-kind (`is_unique = true`, capped at qty 1); supports editions/prints via `is_unique = false` with `quantity_available > 1`. Lifecycle: `draft → published → reserved → sold` / `archived`.
 - **product_images** — ordered gallery images per artwork, one flagged primary.
 - **customers** — optional, keyed by email only, no login. Lets repeat buyers be recognized without an account system.
 - **orders** — guest checkout by default (`customer_id` nullable); stores contact + shipping/billing address as JSONB snapshots.
@@ -43,31 +59,30 @@ Full definitions in [art_shop_schema.sql](art_shop_schema.sql). PostgreSQL 14+.
 ## Functional requirements
 
 ### Portfolio (always on)
-- FR1: List published artworks in a gallery view, with images, title, artist, medium, style, dimensions, year.
+- FR1: List published artworks in a gallery view, with images, title, medium, style, dimensions, year. Single-artist site — no per-artwork artist attribution needed; artist bio/info is a site-wide "About" page, not part of the product data.
 - FR2: Artwork detail page per product.
-- FR3: Browse/filter by category and tags.
-- FR4: Search by title/artist (schema supports fuzzy search via `pg_trgm`).
-- FR5: No price or purchase affordance visible while `SHOP_ENABLED = false`.
+- FR3: Browse/filter by category and tags. No search box planned at current catalog size (<200 pieces) — revisit if the catalog grows substantially.
+- FR4: No price or purchase affordance visible while `SHOP_ENABLED = false`.
 
 ### Shop (gated by `SHOP_ENABLED`)
-- FR6: Show price and availability (`status`, `quantity_available`) on artwork listing/detail when enabled.
-- FR7: Add to cart (guest, session-cookie based); one cart per `session_id`.
-- FR8: Checkout as guest — collect email, name, phone, shipping address (billing optional).
-- FR9: Soft-reserve a unique item during checkout (`status = 'reserved'`, `reserved_until` timestamp) to prevent double-selling a one-of-a-kind piece.
-- FR10: A scheduled job releases expired reservations (`reserved_until` passed, no completed payment) back to `published`.
-- FR11: On successful payment: create `orders` + `order_items`, record `payments`, set product to `sold` (or decrement `quantity_available` for editions).
-- FR12: Order confirmation page/email after purchase.
-- FR13: Recognize a repeat buyer by email (optional `customers` row) without requiring login.
+- FR5: Show price and availability (`status`, `quantity_available`) on artwork listing/detail when enabled.
+- FR6: Add to cart (guest, session-cookie based); one cart per `session_id`.
+- FR7: Checkout as guest — collect email, name, phone, shipping address (billing optional).
+- FR8: Soft-reserve a unique item during checkout (`status = 'reserved'`, `reserved_until` timestamp) to prevent double-selling a one-of-a-kind piece.
+- FR9: A scheduled job releases expired reservations (`reserved_until` passed, no completed payment) back to `published`.
+- FR10: On successful payment: create `orders` + `order_items`, record `payments`, set product to `sold` (or decrement `quantity_available` for editions).
+- FR11: Order confirmation page/email after purchase.
+- FR12: Recognize a repeat buyer by email (optional `customers` row) without requiring login.
 
 ### Admin
-- FR14: Single admin login (`admins` table — no multi-role permissions needed).
-- FR15: CRUD for categories, products, and product images (manage drafts before publishing).
-- FR16: View/manage orders and their status (`pending → paid → processing → shipped → delivered`, or `cancelled` / `refunded`).
-- FR17: Toggle `SHOP_ENABLED` (admin-facing control, if the flag mechanism supports runtime toggling rather than a deploy-time env var).
+- FR13: Single admin login (`admins` table — no multi-role permissions needed).
+- FR14: CRUD for categories, products, and product images (manage drafts before publishing).
+- FR15: View/manage orders and their status (`pending → paid → processing → shipped → delivered`, or `cancelled` / `refunded`).
+- FR16: Toggle `SHOP_ENABLED` (admin-facing control, if the flag mechanism supports runtime toggling rather than a deploy-time env var).
 
 ### Compliance / consent
-- FR18: Log cookie-consent and marketing-consent choices (given/withdrawn) with method and policy version, per `consent_logs`.
-- FR19: Compute current consent state per subject as the latest `consent_logs` row for that (subject, consent_type) pair.
+- FR17: Log cookie-consent and marketing-consent choices (given/withdrawn) with method and policy version, per `consent_logs`.
+- FR18: Compute current consent state per subject as the latest `consent_logs` row for that (subject, consent_type) pair.
 
 ## Payments
 
@@ -79,20 +94,19 @@ Full definitions in [art_shop_schema.sql](art_shop_schema.sql). PostgreSQL 14+.
 ## Non-functional requirements
 
 - NFR1: Currency defaults to EUR (`CHAR(3)`), but schema supports other ISO currency codes per product/order.
-- NFR2: Product/artist search must tolerate typos (fuzzy match via `pg_trgm`).
-- NFR3: Editing or deleting a product must never alter historical order records (`order_items` snapshots enforce this).
-- NFR4: GDPR consent must be provable after the fact — append-only log, not a mutable flag.
-- NFR5: No customer password storage; guest checkout only, minimizing account-security surface area.
+- NFR2: Editing or deleting a product must never alter historical order records (`order_items` snapshots enforce this).
+- NFR3: GDPR consent must be provable after the fact — append-only log, not a mutable flag.
+- NFR4: No customer password storage; guest checkout only, minimizing account-security surface area.
 
 ## Open questions
 
-- [ ] Frontend/backend stack not yet chosen (framework, hosting).
+- [x] Frontend/backend stack — **Next.js (frontend) + NestJS (backend)**, decoupled. Hosting TBD.
 - [ ] Feature flag mechanism: simple env var vs. a flag admins can toggle at runtime from a settings UI.
 - [ ] Which payment provider(s) to integrate first — Stripe assumed as default, confirm.
 - [ ] Shipping cost calculation: flat rate, per-item, or carrier API integration?
 - [ ] Tax handling (EU VAT / OSS) — manual entry vs. automated (e.g. Stripe Tax).
 - [ ] Email delivery for order confirmations — provider TBD.
-- [ ] Image hosting/CDN for `product_images.url`.
+- [x] Image hosting/CDN for `product_images.url` — leaning towards **Cloudflare R2** (cheap at this scale, free egress, so bandwidth to gallery visitors doesn't add cost as traffic grows). Not finalized.
 
 ## License
 

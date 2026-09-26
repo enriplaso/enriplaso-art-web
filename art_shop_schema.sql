@@ -10,7 +10,6 @@
 -- =====================================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- gen_random_uuid()
-CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- fuzzy search on title/artist
 CREATE EXTENSION IF NOT EXISTS citext;    -- case-insensitive email
 
 -- ========================= ENUMS =========================
@@ -51,7 +50,6 @@ CREATE TABLE products (
     slug                TEXT NOT NULL UNIQUE,
     title               TEXT NOT NULL,
     description         TEXT,
-    artist_name         TEXT,
     medium              TEXT,               -- e.g. "Oil on canvas"
     style               TEXT,               -- e.g. "Abstract", "Impressionist"
     year_created        INT,
@@ -74,8 +72,6 @@ CREATE TABLE products (
 
 CREATE INDEX idx_products_status       ON products(status);
 CREATE INDEX idx_products_category     ON products(category_id);
-CREATE INDEX idx_products_title_trgm   ON products USING gin (title gin_trgm_ops);
-CREATE INDEX idx_products_artist_trgm  ON products USING gin (artist_name gin_trgm_ops);
 CREATE INDEX idx_products_tags         ON products USING gin (tags);
 
 -- ========================= PRODUCT IMAGES =========================
