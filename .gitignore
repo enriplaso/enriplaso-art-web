@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Env files (never commit secrets) — deliberately not a `.env.*` wildcard,
+# since that also swallows *.example template files like .env.local.example
+.env
+.env.local
+.env.*.local
+
+# Next.js
+apps/web/.next/
+apps/web/out/
+apps/web/next-env.d.ts
+
+# NestJS
+apps/api/dist/
+
+# Prisma
+apps/api/prisma/*.db
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor/OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+*.tsbuildinfo

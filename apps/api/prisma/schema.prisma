@@ -1,0 +1,396 @@
+// Prisma schema for the Art Shop API.
+//
+// IMPORTANT — fidelity note:
+// This file is the typed-client definition, hand-written to mirror
+// ../../../art_shop_schema.sql. Prisma's schema language cannot express
+// everything that SQL file does:
+//   - CHECK constraints (e.g. price_cents >= 0, unique_items_capped_at_one,
+//     product_disposition allow-list, consent_logs' "at least one subject"
+//     check)
+//   - The two partial unique indexes (one default locale, one primary
+//     image per product) — Prisma only supports unconditional unique
+//     indexes
+//   - The set_updated_at() trigger function and its triggers
+// All of these ARE still enforced, because prisma/migrations/0_init/migration.sql
+// is a verbatim copy of art_shop_schema.sql, not something generated from
+// this file. Run `prisma migrate resolve --applied 0_init` against a fresh
+// database to baseline it, then `prisma generate` to build the client.
+// Any schema change from here on should go through a normal
+// `prisma migrate dev`, which will diff against this file — if you add a
+// CHECK/trigger/partial index by hand again, mirror it here as a comment
+// like the ones above so the next migration doesn't accidentally drop it.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgcrypto, citext]
+}
+
+// ========================= ENUMS =========================
+
+enum ProductStatus {
+  draft
+  published
+  reserved
+  sold
+  archived
+
+  @@map("product_status")
+}
+
+enum OrderStatus {
+  pending
+  paid
+  processing
+  shipped
+  delivered
+  cancelled
+  refunded
+
+  @@map("order_status")
+}
+
+enum PaymentStatus {
+  pending
+  authorized
+  captured
+  failed
+  refunded
+  partially_refunded
+
+  @@map("payment_status")
+}
+
+enum ReturnStatus {
+  requested
+  approved
+  rejected
+  received
+  refunded
+
+  @@map("return_status")
+}
+
+// ========================= ADMIN =========================
+
+model Admin {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String    @unique @db.Citext
+  passwordHash String    @map("password_hash")
+  fullName     String?   @map("full_name")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz
+
+  @@map("admins")
+}
+
+// ========================= LOCALES (i18n) =========================
+
+model Locale {
+  code      String   @id
+  name      String
+  isDefault Boolean  @default(false) @map("is_default")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  categoryTranslations CategoryTranslation[]
+  productTranslations  ProductTranslation[]
+  pageTranslations     PageTranslation[]
+
+  // Partial unique index (WHERE is_default) enforcing at most one
+  // default locale lives only in the SQL migration — see schema note above.
+
+  @@map("locales")
+}
+
+// ========================= CATEGORIES =========================
+
+model Category {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug      String   @unique
+  parentId  String?  @map("parent_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  parent   Category?  @relation("CategoryParent", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryParent")
+
+  translations CategoryTranslation[]
+  products     Product[]
+
+  @@map("categories")
+}
+
+model CategoryTranslation {
+  categoryId  String  @map("category_id") @db.Uuid
+  localeCode  String  @map("locale_code")
+  name        String
+  description String?
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  locale   Locale   @relation(fields: [localeCode], references: [code], onDelete: Restrict)
+
+  @@id([categoryId, localeCode])
+  @@index([localeCode])
+  @@map("category_translations")
+}
+
+// ========================= PRODUCTS =========================
+
+model Product {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sku               String?       @unique
+  slug              String        @unique
+  title             String
+  medium            String?
+  style             String?
+  yearCreated       Int?          @map("year_created")
+  widthCm           Decimal?      @map("width_cm") @db.Decimal(8, 2)
+  heightCm          Decimal?      @map("height_cm") @db.Decimal(8, 2)
+  depthCm           Decimal?      @map("depth_cm") @db.Decimal(8, 2)
+  weightKg          Decimal?      @map("weight_kg") @db.Decimal(8, 2)
+  priceCents        BigInt        @map("price_cents")
+  currency          String        @default("EUR") @db.Char(3)
+  categoryId        String?       @map("category_id") @db.Uuid
+  tags              String[]      @default([])
+  isUnique          Boolean       @default(true) @map("is_unique")
+  quantityAvailable Int           @default(1) @map("quantity_available")
+  status            ProductStatus @default(draft)
+  reservedUntil     DateTime?     @map("reserved_until") @db.Timestamptz
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime      @default(now()) @map("updated_at") @db.Timestamptz
+
+  category     Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  translations ProductTranslation[]
+  images       ProductImage[]
+  cartItems    CartItem[]
+  orderItems   OrderItem[]
+
+  // CHECK (price_cents >= 0), CHECK (quantity_available >= 0), and
+  // CHECK unique_items_capped_at_one live only in the SQL migration.
+
+  @@index([status])
+  @@index([categoryId])
+  @@index([tags], type: Gin)
+  @@map("products")
+}
+
+model ProductTranslation {
+  productId   String  @map("product_id") @db.Uuid
+  localeCode  String  @map("locale_code")
+  description String?
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  locale  Locale  @relation(fields: [localeCode], references: [code], onDelete: Restrict)
+
+  @@id([productId, localeCode])
+  @@index([localeCode])
+  @@map("product_translations")
+}
+
+model ProductImage {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  url       String
+  altText   String?  @map("alt_text")
+  position  Int      @default(0)
+  isPrimary Boolean  @default(false) @map("is_primary")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // Partial unique index (one primary image per product, WHERE is_primary)
+  // lives only in the SQL migration.
+
+  @@index([productId])
+  @@map("product_images")
+}
+
+// ========================= STATIC PAGES (CMS-lite) =========================
+
+model Page {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  translations PageTranslation[]
+
+  @@map("pages")
+}
+
+model PageTranslation {
+  pageId     String   @map("page_id") @db.Uuid
+  localeCode String   @map("locale_code")
+  title      String
+  body       String
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  page   Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  locale Locale @relation(fields: [localeCode], references: [code], onDelete: Restrict)
+
+  @@id([pageId, localeCode])
+  @@index([localeCode])
+  @@map("page_translations")
+}
+
+// ========================= CUSTOMERS (optional) =========================
+
+model Customer {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email     String   @unique @db.Citext
+  fullName  String?  @map("full_name")
+  phone     String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  orders      Order[]
+  consentLogs ConsentLog[]
+
+  @@map("customers")
+}
+
+// ========================= ORDERS =========================
+
+model Order {
+  id               String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderNumber      String      @unique @map("order_number")
+  customerId       String?     @map("customer_id") @db.Uuid
+  email            String      @db.Citext
+  fullName         String      @map("full_name")
+  phone            String?
+  shippingAddress  Json        @map("shipping_address")
+  billingAddress   Json?       @map("billing_address")
+  status           OrderStatus @default(pending)
+  subtotalCents    BigInt      @default(0) @map("subtotal_cents")
+  shippingCents    BigInt      @default(0) @map("shipping_cents")
+  taxCents         BigInt      @default(0) @map("tax_cents")
+  totalCents       BigInt      @default(0) @map("total_cents")
+  currency         String      @default("EUR") @db.Char(3)
+  customerNotes    String?     @map("customer_notes")
+  adminNotes       String?     @map("admin_notes")
+  createdAt        DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime    @default(now()) @map("updated_at") @db.Timestamptz
+
+  customer Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  items    OrderItem[]
+  payments Payment[]
+  returns  Return[]
+
+  @@index([email])
+  @@index([status])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                 String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId            String @map("order_id") @db.Uuid
+  productId          String? @map("product_id") @db.Uuid
+  titleSnapshot      String @map("title_snapshot")
+  priceCentsSnapshot BigInt @map("price_cents_snapshot")
+  quantity           Int    @default(1)
+  subtotalCents      BigInt @map("subtotal_cents")
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  returns Return[]
+
+  // CHECK (quantity > 0) lives only in the SQL migration.
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+// ========================= RETURNS =========================
+
+model Return {
+  id                 String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId            String       @map("order_id") @db.Uuid
+  orderItemId        String       @map("order_item_id") @db.Uuid
+  status             ReturnStatus @default(requested)
+  reason             String?
+  adminNotes         String?      @map("admin_notes")
+  productDisposition String       @default("pending") @map("product_disposition")
+  providerRefundId   String?      @map("provider_refund_id")
+  refundAmountCents  BigInt?      @map("refund_amount_cents")
+  requestedAt        DateTime     @default(now()) @map("requested_at") @db.Timestamptz
+  resolvedAt         DateTime?    @map("resolved_at") @db.Timestamptz
+
+  order     Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  // CHECK (product_disposition IN ('pending','relisted','archived_damaged'))
+  // lives only in the SQL migration.
+
+  @@index([orderId])
+  @@index([status])
+  @@map("returns")
+}
+
+// ========================= PAYMENTS =========================
+
+model Payment {
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId               String        @map("order_id") @db.Uuid
+  provider              String
+  providerTransactionId String?       @map("provider_transaction_id")
+  amountCents           BigInt        @map("amount_cents")
+  currency              String        @db.Char(3)
+  status                PaymentStatus @default(pending)
+  rawResponse           Json?         @map("raw_response")
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("payments")
+}
+
+// ========================= CART (guest, session-based) =========================
+
+model CartItem {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId String   @map("session_id") @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  quantity  Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // CHECK (quantity > 0) lives only in the SQL migration.
+
+  @@unique([sessionId, productId])
+  @@index([sessionId])
+  @@map("cart_items")
+}
+
+// ========================= CONSENT LOGS (GDPR) =========================
+
+model ConsentLog {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId     String?  @map("session_id") @db.Uuid
+  customerId    String?  @map("customer_id") @db.Uuid
+  email         String?  @db.Citext
+  consentType   String   @map("consent_type")
+  action        String
+  method        String?
+  policyVersion String?  @map("policy_version")
+  ipAddress     String?  @map("ip_address") @db.Inet
+  userAgent     String?  @map("user_agent")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  // CHECK (action IN ('given','withdrawn')) and CHECK (session_id IS NOT
+  // NULL OR customer_id IS NOT NULL OR email IS NOT NULL) live only in
+  // the SQL migration.
+
+  @@index([sessionId])
+  @@index([customerId])
+  @@index([email])
+  @@index([consentType])
+  @@map("consent_logs")
+}

@@ -26,6 +26,44 @@ Notes:
 - Both Next.js and NestJS are stateless per-request (no in-memory session state), so either can be scaled horizontally behind a load balancer independently of the other. Cart/session state lives in the DB/cookies (`cart_items.session_id`), not in server memory, so any backend instance can serve any request.
 - Being decoupled, CORS and API authentication (for the admin panel) need explicit setup between the two apps — this doesn't come for free the way it would in a single Next.js full-stack app.
 
+### Project structure
+
+An npm-workspaces monorepo — one `npm install` at the root installs both apps.
+
+```
+enriplaso-art-web/
+├── art_shop_schema.sql        source-of-truth SQL DDL
+├── apps/
+│   ├── web/                   Next.js frontend (App Router, next-intl wired up)
+│   │   ├── src/app/[locale]/  locale-prefixed routes (en default, es/de/fr)
+│   │   ├── messages/          UI translation files, one per locale
+│   │   └── src/middleware.ts  next-intl locale routing
+│   └── api/                   NestJS backend
+│       ├── src/               Nest modules/controllers/services
+│       └── prisma/
+│           ├── schema.prisma          typed client definition
+│           └── migrations/0_init/     verbatim copy of art_shop_schema.sql
+└── package.json                root workspace config
+```
+
+**Why Prisma's baseline migration is a copy of the SQL file, not generated from `schema.prisma`**: Prisma's schema language can't express everything in [art_shop_schema.sql](art_shop_schema.sql) — CHECK constraints, the two partial unique indexes (one default locale, one primary product image), and the `set_updated_at()` trigger. Rather than silently lose those, `apps/api/prisma/migrations/0_init/migration.sql` is byte-for-byte the same SQL file, and `schema.prisma` is hand-written to match it for the typed client. See the fidelity note at the top of `schema.prisma` for what to do when the schema changes.
+
+**Getting started**:
+```bash
+npm install                          # installs both apps
+
+# Backend — point DATABASE_URL (apps/api/.env, copy from .env.example) at a
+# fresh Postgres database, then:
+cd apps/api
+npx prisma migrate deploy            # runs 0_init (the SQL file) against the DB
+npx prisma generate                  # generate the typed client
+npm run start:dev
+
+# Frontend (separate terminal, from apps/web — copy .env.local.example to .env.local first)
+npm run dev
+```
+Both `npm install`, `prisma generate`, and both apps' builds/lints have been verified to run clean as of this scaffold. `prisma migrate deploy`/`start:dev` still need a real Postgres instance to test against — nothing in this repo provisions one yet (see [Open questions](#open-questions)).
+
 ## Feature flag: `SHOP_ENABLED`
 
 A single flag gates all shop functionality.
