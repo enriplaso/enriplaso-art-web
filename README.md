@@ -45,6 +45,127 @@ Requirements for the flag:
 
 Full definitions in [art_shop_schema.sql](art_shop_schema.sql). PostgreSQL 14+.
 
+### Entity relationship diagram
+
+```mermaid
+erDiagram
+    LOCALES {
+        text code PK
+        text name
+        bool is_default
+    }
+    CATEGORIES {
+        uuid id PK
+        text slug
+        uuid parent_id FK
+    }
+    CATEGORY_TRANSLATIONS {
+        uuid category_id "PK, FK"
+        text locale_code "PK, FK"
+        text name
+        text description
+    }
+    PRODUCTS {
+        uuid id PK
+        text slug
+        text title
+        bigint price_cents
+        uuid category_id FK
+        product_status status
+    }
+    PRODUCT_TRANSLATIONS {
+        uuid product_id "PK, FK"
+        text locale_code "PK, FK"
+        text description
+    }
+    PRODUCT_IMAGES {
+        uuid id PK
+        uuid product_id FK
+        text url
+        bool is_primary
+    }
+    PAGES {
+        uuid id PK
+        text slug
+    }
+    PAGE_TRANSLATIONS {
+        uuid page_id "PK, FK"
+        text locale_code "PK, FK"
+        text title
+        text body
+    }
+    CUSTOMERS {
+        uuid id PK
+        citext email
+    }
+    ORDERS {
+        uuid id PK
+        uuid customer_id FK
+        citext email
+        order_status status
+        bigint total_cents
+    }
+    ORDER_ITEMS {
+        uuid id PK
+        uuid order_id FK
+        uuid product_id FK
+        text title_snapshot
+        bigint price_cents_snapshot
+    }
+    RETURNS {
+        uuid id PK
+        uuid order_id FK
+        uuid order_item_id FK
+        return_status status
+        text product_disposition
+    }
+    PAYMENTS {
+        uuid id PK
+        uuid order_id FK
+        text provider
+        payment_status status
+    }
+    CART_ITEMS {
+        uuid id PK
+        uuid session_id
+        uuid product_id FK
+    }
+    CONSENT_LOGS {
+        uuid id PK
+        uuid session_id
+        uuid customer_id FK
+        citext email
+        text consent_type
+    }
+    ADMINS {
+        uuid id PK
+        citext email
+    }
+
+    CATEGORIES |o--o{ CATEGORIES        : "has subcategories"
+    CATEGORIES ||--o{ CATEGORY_TRANSLATIONS : "translated as"
+    LOCALES    ||--o{ CATEGORY_TRANSLATIONS : "locale of"
+    CATEGORIES |o--o{ PRODUCTS          : "groups"
+    PRODUCTS   ||--o{ PRODUCT_TRANSLATIONS  : "translated as"
+    LOCALES    ||--o{ PRODUCT_TRANSLATIONS  : "locale of"
+    PRODUCTS   ||--o{ PRODUCT_IMAGES    : "shows"
+    PRODUCTS   ||--o{ CART_ITEMS        : "added to"
+    PRODUCTS   |o--o{ ORDER_ITEMS       : "sold as"
+    PAGES      ||--o{ PAGE_TRANSLATIONS : "translated as"
+    LOCALES    ||--o{ PAGE_TRANSLATIONS : "locale of"
+    CUSTOMERS  |o--o{ ORDERS            : "places"
+    CUSTOMERS  |o--o{ CONSENT_LOGS      : "gives"
+    ORDERS     ||--o{ ORDER_ITEMS       : "contains"
+    ORDERS     ||--o{ PAYMENTS          : "paid via"
+    ORDERS     ||--o{ RETURNS           : "may have"
+    ORDER_ITEMS ||--o{ RETURNS          : "returned as"
+```
+
+Notes on the diagram:
+- `|o` = zero-or-one, `||` = exactly one, `o{` = zero-or-many — matches each FK's actual nullability in [art_shop_schema.sql](art_shop_schema.sql) (e.g. `CATEGORIES |o--o{ PRODUCTS` reflects `products.category_id` being nullable — an artwork doesn't have to be categorized).
+- `ADMINS` has no relationships to any other table — it's fully standalone, per the single-admin design.
+- `cart_items.session_id` and `consent_logs.session_id` are plain UUIDs from a browser cookie, not foreign keys — there's no `sessions` table, so no relationship line for them.
+
 - **admins** — single admin account (no roles/permissions layer needed).
 - **locales** — supported languages (table, not an enum, so adding one is a row insert, not a migration). Seeded with English (default), Spanish, German, French.
 - **categories** — hierarchical (self-referencing `parent_id`) for organizing artwork; `slug` is a single language-neutral URL segment.
