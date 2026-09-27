@@ -80,6 +80,17 @@ npm run dev
 
 **No separate DAO/repository layer either** — `PrismaService`'s generated, typed query methods (`prisma.product.findMany()`, etc.) already are the data-access layer; wrapping them in another pass-through class per model would add a layer with no behavior of its own. Services call `PrismaService` directly — see [prisma.service.ts](apps/api/src/prisma/prisma.service.ts) for how the client's lifecycle (connect/disconnect) is hooked into Nest's module lifecycle. The one exception is raw SQL for things Prisma's DSL can't express (e.g. the consent-state `DISTINCT ON` query) — always via `$queryRaw`'s tagged-template syntax (auto-parameterized, safe), never `$queryRawUnsafe` with a manually built string.
 
+### Health checks
+
+`HealthModule` ([health.controller.ts](apps/api/src/health/health.controller.ts), via `@nestjs/terminus`) exposes two intentionally different endpoints — conflating them is a common mistake that causes an app to restart-loop during a database outage instead of recovering on its own:
+
+| Endpoint | Checks | Meaning | On failure |
+|---|---|---|---|
+| `GET /health` | Nothing — process only | **Liveness**: is this process alive? | Orchestrator (Docker/k8s) **restarts the container**. Must never depend on external services — restarting the API doesn't fix a Postgres outage, it just crash-loops the API while the real problem is elsewhere. |
+| `GET /health/ready` | Postgres, via `PrismaHealthIndicator.pingCheck()` | **Readiness**: should traffic be routed here right now? | Orchestrator **stops routing traffic** here, but leaves the process running. It recovers automatically — no restart — the moment Postgres is reachable again. |
+
+Verified by hand: stopping the `db` container makes `/health/ready` return `503` while `/health` stays `200`; restarting `db` brings `/health/ready` back to `200` on its own, with no app restart at any point. When this gets containerized, wire a Dockerfile `HEALTHCHECK` / Kubernetes `livenessProbe` to `/health` and a `readinessProbe` to `/health/ready` — never the reverse.
+
 ## Feature flag: `SHOP_ENABLED`
 
 A single flag gates all shop functionality.
