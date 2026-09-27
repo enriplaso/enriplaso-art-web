@@ -52,9 +52,11 @@ enriplaso-art-web/
 ```bash
 npm install                          # installs both apps
 
-# Backend — point DATABASE_URL (apps/api/.env, copy from .env.example) at a
-# fresh Postgres database, then:
+docker compose up -d                 # local Postgres for development (see docker-compose.yml)
+
+# Backend
 cd apps/api
+copy .env.example .env               # DATABASE_URL already matches docker-compose.yml's credentials
 npx prisma migrate deploy            # runs 0_init (the SQL file) against the DB
 npx prisma generate                  # generate the typed client
 npm run start:dev
@@ -62,7 +64,7 @@ npm run start:dev
 # Frontend (separate terminal, from apps/web — copy .env.local.example to .env.local first)
 npm run dev
 ```
-Both `npm install`, `prisma generate`, and both apps' builds/lints have been verified to run clean as of this scaffold. `prisma migrate deploy`/`start:dev` still need a real Postgres instance to test against — nothing in this repo provisions one yet (see [Open questions](#open-questions)).
+`docker-compose.yml` at the repo root runs a single `postgres:16-alpine` container for local development only — it is not a production database setup (see [Open questions](#open-questions) for managed hosting). Both `npm install`, `prisma generate`, and both apps' builds/lints have been verified to run clean as of this scaffold; `docker compose up`/`prisma migrate deploy`/`start:dev` are untested in this environment (no running Docker daemon available here) but use standard, well-tested tooling.
 
 ## Feature flag: `SHOP_ENABLED`
 
