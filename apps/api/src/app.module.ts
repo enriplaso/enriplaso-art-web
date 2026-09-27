@@ -6,6 +6,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ProductsModule } from './products/products.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
+import { CategoriesModule } from './categories/categories.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { AuthModule } from './auth/auth.module';
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 100 }]),
     PrismaModule,
     AuthModule,
+    CategoriesModule,
     ProductsModule,
     HealthModule,
   ],

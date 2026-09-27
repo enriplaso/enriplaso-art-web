@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, ProductStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { getDefaultLocaleCode, pickTranslation } from '../i18n/locale.utils';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
@@ -173,14 +174,8 @@ export class ProductsService {
     }
   }
 
-  private async getDefaultLocaleCode(): Promise<string> {
-    const locale = await this.prisma.locale.findFirst({
-      where: { isDefault: true },
-    });
-    if (!locale) {
-      throw new BadRequestException('No default locale is configured');
-    }
-    return locale.code;
+  private getDefaultLocaleCode(): Promise<string> {
+    return getDefaultLocaleCode(this.prisma);
   }
 
   private toResponse(
@@ -188,9 +183,11 @@ export class ProductsService {
     locale: string,
     defaultLocale: string,
   ) {
-    const translation =
-      product.translations.find((t) => t.localeCode === locale) ??
-      product.translations.find((t) => t.localeCode === defaultLocale);
+    const translation = pickTranslation(
+      product.translations,
+      locale,
+      defaultLocale,
+    );
 
     const sortedImages = [...product.images].sort(
       (a, b) => a.position - b.position,

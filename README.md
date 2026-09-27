@@ -311,7 +311,7 @@ Notes on the diagram:
 
 ### Admin
 - FR13: Single admin login (`admins` table — no multi-role permissions needed). Implemented — see [Admin authentication](#admin-authentication).
-- FR14: CRUD for categories, products, and product images (manage drafts before publishing).
+- FR14: CRUD for categories, products, and product images (manage drafts before publishing). Categories and products are implemented; product images (upload to Cloudflare R2) are not yet. Categories: a new category must include a default-locale translation (so the fallback always has a name to show); moving a category under itself or one of its own descendants is rejected; deleting a category leaves its products and subcategories in place, with no category / at the top level (`ON DELETE SET NULL`), verified against the real database in [categories.e2e-spec.ts](apps/api/test/e2e/categories.e2e-spec.ts).
 - FR15: View/manage orders and their status (`pending → paid → processing → shipped → delivered`, or `cancelled` / `refunded`).
 - FR16: Toggle `SHOP_ENABLED` (admin-facing control, if the flag mechanism supports runtime toggling rather than a deploy-time env var).
 
