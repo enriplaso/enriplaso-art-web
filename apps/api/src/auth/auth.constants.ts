@@ -14,6 +14,12 @@ export const PENDING_2FA_PURPOSE = 'pending_2fa';
 
 export const BACKUP_CODE_COUNT = 10;
 
+// Account-level lockout across both the password and 2FA-code steps —
+// protects the one admin account regardless of source IP, which IP-based
+// rate limiting (nginx or @nestjs/throttler) cannot do on its own.
+export const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+export const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+
 export function getAuthCookieOptions(): CookieOptions {
   return {
     httpOnly: true,

@@ -7,23 +7,30 @@ import request from 'supertest';
 import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { configureApp } from '../../src/configure-app';
+import { MAX_FAILED_LOGIN_ATTEMPTS } from '../../src/auth/auth.constants';
 
 const TEST_ADMIN_EMAIL = 'e2e-test-admin@example.com';
 const TEST_ADMIN_PASSWORD = 'correct-horse-battery-staple';
 const TWO_FA_ADMIN_EMAIL = 'e2e-2fa-admin@example.com';
+const LOCKOUT_ADMIN_EMAIL = 'e2e-lockout-admin@example.com';
+
+async function createTestApp(): Promise<INestApplication> {
+  const moduleFixture: TestingModule = await Test.createTestingModule({
+    imports: [AppModule],
+  }).compile();
+
+  const app = moduleFixture.createNestApplication();
+  configureApp(app);
+  await app.init();
+  return app;
+}
 
 describe('Auth (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
 
   beforeAll(async () => {
-    const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
-
-    app = moduleFixture.createNestApplication();
-    configureApp(app);
-    await app.init();
+    app = await createTestApp();
     prisma = app.get(PrismaService);
 
     const passwordHash = await bcrypt.hash(TEST_ADMIN_PASSWORD, 4);
@@ -40,7 +47,11 @@ describe('Auth (e2e)', () => {
 
   afterAll(async () => {
     await prisma.admin.deleteMany({
-      where: { email: { in: [TEST_ADMIN_EMAIL, TWO_FA_ADMIN_EMAIL] } },
+      where: {
+        email: {
+          in: [TEST_ADMIN_EMAIL, TWO_FA_ADMIN_EMAIL, LOCKOUT_ADMIN_EMAIL],
+        },
+      },
     });
     await app.close();
   });
@@ -203,6 +214,65 @@ describe('Auth (e2e)', () => {
         .send({ code: secondBackupCode })
         .expect(201);
       await agent.post('/auth/2fa/disable').expect(201);
+    });
+  });
+
+  describe('account lockout', () => {
+    // A fresh app instance (fresh in-memory throttler state) — this test
+    // makes MAX_FAILED_LOGIN_ATTEMPTS + 2 requests to /auth/login on its
+    // own, which combined with the rest of this file's login calls could
+    // otherwise trip the unrelated IP-based throttle (10/min) sharing the
+    // outer app instance, and be misattributed to the wrong mechanism.
+    let lockoutApp: INestApplication;
+
+    beforeAll(async () => {
+      lockoutApp = await createTestApp();
+
+      const passwordHash = await bcrypt.hash(TEST_ADMIN_PASSWORD, 4);
+      await prisma.admin.upsert({
+        where: { email: LOCKOUT_ADMIN_EMAIL },
+        update: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
+        create: { email: LOCKOUT_ADMIN_EMAIL, passwordHash },
+      });
+    });
+
+    afterAll(async () => {
+      await lockoutApp.close();
+    });
+
+    it('locks the account after MAX_FAILED_LOGIN_ATTEMPTS wrong passwords, even for the correct password', async () => {
+      for (let i = 0; i < MAX_FAILED_LOGIN_ATTEMPTS; i++) {
+        await request(lockoutApp.getHttpServer())
+          .post('/auth/login')
+          .send({ email: LOCKOUT_ADMIN_EMAIL, password: 'wrong' })
+          .expect(401);
+      }
+
+      await request(lockoutApp.getHttpServer())
+        .post('/auth/login')
+        .send({ email: LOCKOUT_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD })
+        .expect(429);
+    });
+
+    it('unlocks again once the lock has expired', async () => {
+      // Simulate time passing rather than waiting out the real 15-minute
+      // lockout duration.
+      await prisma.admin.update({
+        where: { email: LOCKOUT_ADMIN_EMAIL },
+        data: { lockedUntil: new Date(Date.now() - 1000) },
+      });
+
+      await request(lockoutApp.getHttpServer())
+        .post('/auth/login')
+        .send({ email: LOCKOUT_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD })
+        .expect(201);
+
+      const admin = await prisma.admin.findUniqueOrThrow({
+        where: { email: LOCKOUT_ADMIN_EMAIL },
+      });
+      if (admin.failedLoginAttempts !== 0 || admin.lockedUntil !== null) {
+        throw new Error('expected the lockout state to be reset');
+      }
     });
   });
 });

@@ -119,6 +119,22 @@ Optional per-admin, on top of the password. Uses standard TOTP (RFC 6238) — wo
 
 Full flow verified by hand against the real server, database, and real generated TOTP codes: enroll → confirm → next login pauses at `requiresTwoFactor` → pending cookie alone correctly rejected by `/auth/me` → wrong code rejected → correct code completes login → backup code works as an alternative → a used backup code is correctly rejected on reuse → disable restores password-only login. Automated as an e2e test in [auth.e2e-spec.ts](apps/api/test/e2e/auth.e2e-spec.ts) using `otplib` to generate real codes rather than mocking time/crypto.
 
+#### Rate limiting
+
+Two independent layers, because they defend against different things — one doesn't make the other redundant, including once nginx (or another edge proxy) sits in front of this in production:
+
+| Layer | Scope | Catches | Doesn't catch |
+|---|---|---|---|
+| **`@nestjs/throttler`** (`ThrottlerGuard`, global default 100 req/min/IP; `10 req/min/IP` on `/auth/login` and `/auth/2fa/verify` specifically) | Per IP address | Generic volumetric abuse from one source | An attacker spreading requests across many IPs (proxies, botnets) targeting the *same* admin account — IP-based limiting has no concept of "account," only "source address," and a shared IP (corporate NAT, mobile carrier) can wrongly throttle unrelated legitimate users |
+| **Account lockout** (`admins.failed_login_attempts`/`locked_until`, in `AuthService`) | Per admin account | The actual threat that matters for a single-admin site: guessing *this* account's password or TOTP code, regardless of source IP | Generic request flooding unrelated to a specific account (that's the throttler's job) |
+
+Design details:
+- The failure counter is shared across **both** the password step and the 2FA-code step, and only resets to zero when a login fully completes. Resetting it after a successful password check (before 2FA) would let an attacker who already has the password get unlimited tries at the 2FA code, since each of their password attempts would count as "successful."
+- Locking checks happen **before** comparing the password/code, not after — otherwise the lockout would only ever apply retroactively to the attempt that triggered it, not to the ones that should be blocked by it.
+- 5 failed attempts → 15-minute lock (`MAX_FAILED_LOGIN_ATTEMPTS`/`LOCKOUT_DURATION_MS` in [auth.constants.ts](apps/api/src/auth/auth.constants.ts)). A lock that has simply timed out doesn't need an explicit "unlock" step — the timestamp comparison naturally stops blocking once it's passed.
+- Verified by hand against the real server/database: baseline login works → 5 wrong passwords → the 6th attempt is rejected (`429`) **even with the correct password**, proving the lock protects the account, not just wrong guesses → manually expiring the lock in the database lets login succeed again and resets the counter to zero. The IP throttle was verified separately: exactly the first 10 requests to `/auth/login` in a 60-second window succeed, the 11th gets `429`.
+- The two mechanisms needed to be tested in isolation from each other in [auth.e2e-spec.ts](apps/api/test/e2e/auth.e2e-spec.ts)/[rate-limit.e2e-spec.ts](apps/api/test/e2e/rate-limit.e2e-spec.ts): both are IP+time-window-scoped in-memory state tied to one Nest application instance, so a test suite making many `/auth/login` calls for unrelated reasons (2FA flow tests, lockout tests) can accidentally trip the *other* mechanism and produce a `429` that's misattributed to the wrong cause. `Test.createTestingModule(...).overrideGuard(ThrottlerGuard)` does **not** work for this — a guard registered globally via `APP_GUARD` isn't intercepted by `overrideGuard`, which only overrides guards resolved through `@UseGuards()` metadata. The reliable fix was giving throttling-sensitive test groups their own fresh app instance instead, each starting with an empty counter.
+
 ## Feature flag: `SHOP_ENABLED`
 
 A single flag gates all shop functionality.

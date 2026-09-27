@@ -44,7 +44,15 @@ CREATE TABLE admins (
     -- at confirmation; each is removed from the array once used.
     totp_secret   TEXT,
     totp_enabled  BOOLEAN NOT NULL DEFAULT false,
-    backup_codes  TEXT[] NOT NULL DEFAULT '{}'
+    backup_codes  TEXT[] NOT NULL DEFAULT '{}',
+    -- Account-level lockout: counts failures across BOTH the password step
+    -- and the 2FA-code step (an attacker who already has the password
+    -- shouldn't get unlimited tries at guessing the 2FA code either), and
+    -- resets to zero only when a login fully completes. This protects the
+    -- one admin account regardless of source IP, which IP-based rate
+    -- limiting (nginx or otherwise) cannot do on its own.
+    failed_login_attempts INT NOT NULL DEFAULT 0,
+    locked_until          TIMESTAMPTZ
 );
 
 -- ========================= LOCALES (i18n) =========================

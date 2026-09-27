@@ -95,6 +95,11 @@ model Admin {
   totpEnabled  Boolean   @default(false) @map("totp_enabled")
   backupCodes  String[]  @default([]) @map("backup_codes")
 
+  // Account-level lockout across both the password and 2FA-code steps —
+  // see the matching comment in art_shop_schema.sql for the reasoning.
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until") @db.Timestamptz
+
   @@map("admins")
 }
 

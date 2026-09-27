@@ -8,6 +8,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Response, Request } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -25,6 +26,11 @@ import {
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  // Stricter than the app-wide default (100/min) — this is the endpoint an
+  // IP-based brute force would actually hit. Complements, doesn't replace,
+  // the account-level lockout in AuthService (see the README's "Rate
+  // limiting" section for why both layers are needed).
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('login')
   async login(
     @Body() dto: LoginDto,
@@ -47,6 +53,7 @@ export class AuthController {
     return { admin: result.admin };
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('2fa/verify')
   async verifyTwoFactor(
     @Body() dto: TotpCodeDto,

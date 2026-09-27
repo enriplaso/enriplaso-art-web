@@ -1,5 +1,10 @@
 import { randomBytes } from 'crypto';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  HttpException,
+  HttpStatus,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { authenticator } from 'otplib';
@@ -7,6 +12,8 @@ import * as QRCode from 'qrcode';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   BACKUP_CODE_COUNT,
+  LOCKOUT_DURATION_MS,
+  MAX_FAILED_LOGIN_ATTEMPTS,
   PENDING_2FA_PURPOSE,
   PENDING_2FA_TOKEN_EXPIRES_IN,
 } from './auth.constants';
@@ -33,11 +40,22 @@ export class AuthService {
   async login(email: string, password: string): Promise<LoginResult> {
     const admin = await this.prisma.admin.findUnique({ where: { email } });
 
-    if (!admin || !(await bcrypt.compare(password, admin.passwordHash))) {
+    if (!admin) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+
+    this.assertNotLocked(admin);
+
+    if (!(await bcrypt.compare(password, admin.passwordHash))) {
+      await this.registerFailedAttempt(admin);
       throw new UnauthorizedException('Invalid email or password');
     }
 
     if (admin.totpEnabled) {
+      // Password step succeeded, but the login isn't complete — the
+      // failure counter deliberately isn't reset yet, so an attacker who
+      // already has the password can't get unlimited tries at the 2FA
+      // code just because each of their password attempts "succeeded".
       const pendingToken = await this.jwtService.signAsync(
         { sub: admin.id, purpose: PENDING_2FA_PURPOSE },
         { expiresIn: PENDING_2FA_TOKEN_EXPIRES_IN },
@@ -45,11 +63,15 @@ export class AuthService {
       return { requiresTwoFactor: true, pendingToken };
     }
 
-    // Only reached when 2FA isn't enabled — otherwise lastLoginAt is
-    // updated in verifyTwoFactor, once the login is actually complete.
+    // Only reached when 2FA isn't enabled — otherwise lastLoginAt (and the
+    // lockout reset) happens in verifyTwoFactor, once login is complete.
     await this.prisma.admin.update({
       where: { id: admin.id },
-      data: { lastLoginAt: new Date() },
+      data: {
+        lastLoginAt: new Date(),
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      },
     });
 
     const token = await this.signSessionToken(admin.id, admin.email);
@@ -86,6 +108,8 @@ export class AuthService {
       );
     }
 
+    this.assertNotLocked(admin);
+
     const isValidTotp = authenticator.verify({
       token: code,
       secret: admin.totpSecret,
@@ -98,6 +122,7 @@ export class AuthService {
         code,
       );
       if (matchIndex === -1) {
+        await this.registerFailedAttempt(admin);
         throw new UnauthorizedException('Invalid authentication code');
       }
       usedBackupCode = true;
@@ -111,7 +136,11 @@ export class AuthService {
 
     await this.prisma.admin.update({
       where: { id: admin.id },
-      data: { lastLoginAt: new Date() },
+      data: {
+        lastLoginAt: new Date(),
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      },
     });
 
     const token = await this.signSessionToken(admin.id, admin.email);
@@ -204,6 +233,32 @@ export class AuthService {
 
   private signSessionToken(adminId: string, email: string): Promise<string> {
     return this.jwtService.signAsync({ sub: adminId, email });
+  }
+
+  private assertNotLocked(admin: { lockedUntil: Date | null }): void {
+    if (admin.lockedUntil && admin.lockedUntil.getTime() > Date.now()) {
+      throw new HttpException(
+        'Account temporarily locked due to too many failed attempts. Try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  private async registerFailedAttempt(admin: {
+    id: string;
+    failedLoginAttempts: number;
+  }): Promise<void> {
+    const attempts = admin.failedLoginAttempts + 1;
+    await this.prisma.admin.update({
+      where: { id: admin.id },
+      data: {
+        failedLoginAttempts: attempts,
+        lockedUntil:
+          attempts >= MAX_FAILED_LOGIN_ATTEMPTS
+            ? new Date(Date.now() + LOCKOUT_DURATION_MS)
+            : null,
+      },
+    });
   }
 
   private generateBackupCodes(): string[] {

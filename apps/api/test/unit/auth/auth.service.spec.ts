@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { UnauthorizedException } from '@nestjs/common';
+import { HttpException, UnauthorizedException } from '@nestjs/common';
 import type { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
 import { PrismaService } from '../../../src/prisma/prisma.service';
 import { AuthService } from '../../../src/auth/auth.service';
-import { PENDING_2FA_PURPOSE } from '../../../src/auth/auth.constants';
+import {
+  MAX_FAILED_LOGIN_ATTEMPTS,
+  PENDING_2FA_PURPOSE,
+} from '../../../src/auth/auth.constants';
 
 vi.mock('bcryptjs', () => ({
   compare: vi.fn(),
@@ -56,6 +59,8 @@ const ADMIN = {
   totpSecret: null as string | null,
   totpEnabled: false,
   backupCodes: [] as string[],
+  failedLoginAttempts: 0,
+  lockedUntil: null as Date | null,
 };
 
 describe('AuthService', () => {
@@ -87,14 +92,65 @@ describe('AuthService', () => {
       );
     });
 
-    it('throws UnauthorizedException when the password does not match', async () => {
+    it('throws UnauthorizedException and records a failed attempt when the password does not match', async () => {
       prisma.admin.findUnique.mockResolvedValue(ADMIN);
       vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
 
       await expect(service.login(ADMIN.email, 'wrong')).rejects.toThrow(
         UnauthorizedException,
       );
+      expect(prisma.admin.update).toHaveBeenCalledWith({
+        where: { id: ADMIN.id },
+        data: { failedLoginAttempts: 1, lockedUntil: null },
+      });
+    });
+
+    it('locks the account once MAX_FAILED_LOGIN_ATTEMPTS is reached', async () => {
+      prisma.admin.findUnique.mockResolvedValue({
+        ...ADMIN,
+        failedLoginAttempts: MAX_FAILED_LOGIN_ATTEMPTS - 1,
+      });
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
+
+      await expect(service.login(ADMIN.email, 'wrong')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(prisma.admin.update).toHaveBeenCalledWith({
+        where: { id: ADMIN.id },
+        data: {
+          failedLoginAttempts: MAX_FAILED_LOGIN_ATTEMPTS,
+          lockedUntil: expect.any(Date),
+        },
+      });
+    });
+
+    it('rejects immediately (without checking the password) while locked', async () => {
+      prisma.admin.findUnique.mockResolvedValue({
+        ...ADMIN,
+        lockedUntil: new Date(Date.now() + 60_000),
+      });
+
+      await expect(
+        service.login(ADMIN.email, 'correct-horse-battery-staple'),
+      ).rejects.toThrow(HttpException);
+      expect(bcrypt.compare).not.toHaveBeenCalled();
       expect(prisma.admin.update).not.toHaveBeenCalled();
+    });
+
+    it('allows login again once the lock has expired', async () => {
+      prisma.admin.findUnique.mockResolvedValue({
+        ...ADMIN,
+        lockedUntil: new Date(Date.now() - 1000), // expired
+      });
+      vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
+      jwtService.signAsync.mockResolvedValue('signed.jwt.token');
+
+      const result = await service.login(ADMIN.email, 'correct-password');
+
+      if (result.requiresTwoFactor) {
+        throw new Error('expected requiresTwoFactor to be false');
+      }
+      expect(result.token).toBe('signed.jwt.token');
     });
 
     it('updates lastLoginAt and returns a signed token when 2FA is off', async () => {
@@ -104,9 +160,14 @@ describe('AuthService', () => {
 
       const result = await service.login(ADMIN.email, 'correct-password');
 
-      expect(prisma.admin.update).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: ADMIN.id } }),
-      );
+      expect(prisma.admin.update).toHaveBeenCalledWith({
+        where: { id: ADMIN.id },
+        data: {
+          lastLoginAt: expect.any(Date),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
       expect(jwtService.signAsync).toHaveBeenCalledWith({
         sub: ADMIN.id,
         email: ADMIN.email,
@@ -182,9 +243,48 @@ describe('AuthService', () => {
 
       expect(result.usedBackupCode).toBe(false);
       expect(result.token).toBe('full-session-token');
-      expect(prisma.admin.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { lastLoginAt: expect.any(Date) } }),
-      );
+      expect(prisma.admin.update).toHaveBeenCalledWith({
+        where: { id: TWO_FA_ADMIN.id },
+        data: {
+          lastLoginAt: expect.any(Date),
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      });
+    });
+
+    it('rejects immediately while locked, without checking the code', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: TWO_FA_ADMIN.id,
+        purpose: PENDING_2FA_PURPOSE,
+      });
+      prisma.admin.findUnique.mockResolvedValue({
+        ...TWO_FA_ADMIN,
+        lockedUntil: new Date(Date.now() + 60_000),
+      });
+
+      await expect(
+        service.verifyTwoFactor('pending-token', '123456'),
+      ).rejects.toThrow(HttpException);
+      expect(authenticator.verify).not.toHaveBeenCalled();
+    });
+
+    it('records a failed attempt when the code is wrong', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: TWO_FA_ADMIN.id,
+        purpose: PENDING_2FA_PURPOSE,
+      });
+      prisma.admin.findUnique.mockResolvedValue(TWO_FA_ADMIN);
+      vi.mocked(authenticator.verify).mockReturnValue(false);
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
+
+      await expect(
+        service.verifyTwoFactor('pending-token', 'wrong'),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(prisma.admin.update).toHaveBeenCalledWith({
+        where: { id: TWO_FA_ADMIN.id },
+        data: { failedLoginAttempts: 1, lockedUntil: null },
+      });
     });
 
     it('falls back to a backup code and consumes it on use', async () => {
