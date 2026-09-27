@@ -86,6 +86,15 @@ model Admin {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz
   lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz
 
+  // TOTP-based 2FA. totpSecret is set as soon as enrollment starts but
+  // totpEnabled stays false — and login stays password-only — until the
+  // admin proves they scanned it right via /auth/2fa/confirm. backupCodes
+  // are bcrypt-hashed one-time recovery codes, generated at confirmation;
+  // each is removed from the array the moment it's used.
+  totpSecret   String?   @map("totp_secret")
+  totpEnabled  Boolean   @default(false) @map("totp_enabled")
+  backupCodes  String[]  @default([]) @map("backup_codes")
+
   @@map("admins")
 }
 

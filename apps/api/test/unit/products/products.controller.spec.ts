@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ProductsController } from '../../../src/products/products.controller';
 import { ProductsService } from '../../../src/products/products.service';
+import { AdminAuthGuard } from '../../../src/auth/admin-auth.guard';
 
 interface MockProductsService {
   findPublished: Mock;
@@ -24,10 +25,16 @@ describe('ProductsController', () => {
       archive: vi.fn(),
     };
 
+    // This suite tests controller-to-service delegation, not auth — the
+    // guard's own behavior is covered by admin-auth.guard.spec.ts, and its
+    // enforcement on these routes is covered by the e2e suite.
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ProductsController],
       providers: [{ provide: ProductsService, useValue: service }],
-    }).compile();
+    })
+      .overrideGuard(AdminAuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
 
     controller = module.get(ProductsController);
   });

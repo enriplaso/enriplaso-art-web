@@ -36,7 +36,15 @@ CREATE TABLE admins (
     password_hash TEXT NOT NULL,
     full_name     TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_login_at TIMESTAMPTZ
+    last_login_at TIMESTAMPTZ,
+    -- TOTP-based 2FA. totp_secret is set as soon as enrollment starts but
+    -- totp_enabled stays false — login stays password-only — until the
+    -- admin proves they scanned it right via POST /auth/2fa/confirm.
+    -- backup_codes are bcrypt-hashed one-time recovery codes, generated
+    -- at confirmation; each is removed from the array once used.
+    totp_secret   TEXT,
+    totp_enabled  BOOLEAN NOT NULL DEFAULT false,
+    backup_codes  TEXT[] NOT NULL DEFAULT '{}'
 );
 
 -- ========================= LOCALES (i18n) =========================

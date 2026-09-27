@@ -9,7 +9,9 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
+import { AdminAuthGuard } from '../auth/admin-auth.guard';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -29,21 +31,20 @@ export class ProductsController {
     return this.productsService.findBySlug(slug, locale);
   }
 
-  // TODO: admin-only auth guard once FR13 (admin login) exists — this is
-  // currently unprotected.
+  @UseGuards(AdminAuthGuard)
   @Post()
   create(@Body() dto: CreateProductDto) {
     return this.productsService.create(dto);
   }
 
-  // TODO: admin-only auth guard once FR13 (admin login) exists.
+  @UseGuards(AdminAuthGuard)
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateProductDto) {
     return this.productsService.update(id, dto);
   }
 
-  // TODO: admin-only auth guard once FR13 (admin login) exists.
   // Archives rather than hard-deletes — see ProductsService.archive.
+  @UseGuards(AdminAuthGuard)
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string) {

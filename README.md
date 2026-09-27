@@ -56,15 +56,16 @@ docker compose up -d                 # local Postgres for development (see docke
 
 # Backend
 cd apps/api
-copy .env.example .env               # DATABASE_URL already matches docker-compose.yml's credentials
+copy .env.example .env               # DATABASE_URL already matches docker-compose.yml's credentials; set JWT_SECRET too
 npx prisma migrate deploy            # runs 0_init (the SQL file) against the DB
 npx prisma generate                  # generate the typed client
+SEED_ADMIN_EMAIL=you@example.com SEED_ADMIN_PASSWORD=choose-one npm run prisma:seed  # creates the one admin account
 npm run start:dev
 
 # Frontend (separate terminal, from apps/web — copy .env.local.example to .env.local first)
 npm run dev
 ```
-`docker-compose.yml` at the repo root runs a single `postgres:16-alpine` container for local development only — it is not a production database setup (see [Open questions](#open-questions) for managed hosting). Both `npm install`, `prisma generate`, and both apps' builds/lints have been verified to run clean as of this scaffold; `docker compose up`/`prisma migrate deploy`/`start:dev` are untested in this environment (no running Docker daemon available here) but use standard, well-tested tooling.
+`docker-compose.yml` at the repo root runs a single `postgres:16-alpine` container for local development only — it is not a production database setup (see [Open questions](#open-questions) for managed hosting). `npm install`, `prisma generate`, both apps' builds/lints/tests, and the full auth + health-check flow have all been verified against a real running server and database as of this scaffold.
 
 ### Backend architecture
 
@@ -90,6 +91,33 @@ npm run dev
 | `GET /health/ready` | Postgres, via `PrismaHealthIndicator.pingCheck()` | **Readiness**: should traffic be routed here right now? | Orchestrator **stops routing traffic** here, but leaves the process running. It recovers automatically — no restart — the moment Postgres is reachable again. |
 
 Verified by hand: stopping the `db` container makes `/health/ready` return `503` while `/health` stays `200`; restarting `db` brings `/health/ready` back to `200` on its own, with no app restart at any point. When this gets containerized, wire a Dockerfile `HEALTHCHECK` / Kubernetes `livenessProbe` to `/health` and a `readinessProbe` to `/health/ready` — never the reverse.
+
+### Admin authentication
+
+`AuthModule` ([auth.module.ts](apps/api/src/auth/auth.module.ts)) protects every admin-only write endpoint (currently `POST`/`PATCH`/`DELETE /products`, via `@UseGuards(AdminAuthGuard)`; every future admin action follows the same pattern).
+
+- **Login** (`POST /auth/login`): looks up `admins` by email, compares the password against `password_hash` with **bcrypt**, and on success signs a JWT and sets it as an **httpOnly, Secure (in production), SameSite=Lax cookie** — never returned in the response body, so it's unreachable from JavaScript (XSS-proof) and safe for the decoupled Next.js frontend to use via `credentials: 'include'` (CORS already allows credentials, per [Tech stack](#tech-stack)).
+- **`AdminAuthGuard`** reads that cookie, verifies the JWT via `@nestjs/jwt`, and attaches the admin to the request. It's a plain `CanActivate` guard, not Passport — Passport's strategy-swapping (OAuth, multiple providers) isn't a problem this single hardcoded admin account has.
+- **No refresh-token rotation** — a longer-lived token (7 days) plus a working `POST /auth/logout` is enough for one low-traffic admin; refresh tokens solve a multi-user/high-security problem this app doesn't have.
+- **Bootstrapping**: there's no signup flow by design. The first (and likely only) admin is created via `npm run prisma:seed` ([seed.ts](apps/api/prisma/seed.ts)), reading `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD` from the environment and hashing the password with bcrypt — never commit real credentials, only ever pass them inline when running the seed.
+
+**A NestJS DI gotcha worth knowing if this pattern gets copied**: `@UseGuards(SomeGuard)` resolves the guard from the *consuming* module's injector, not the module where the guard is declared. Exporting `AdminAuthGuard` from `AuthModule` wasn't enough on its own — `ProductsModule` also needed `JwtModule` (the guard's own dependency) re-exported through `AuthModule`, or booting the real app failed with a `Nest can't resolve dependencies` error despite the guard's unit tests passing fine (unit tests call controller methods directly, bypassing the guard pipeline entirely, so they never exercised this).
+
+**Another gap this surfaced**: building the app via `Test.createTestingModule(...).createNestApplication()` (what every e2e test does) never runs `main.ts`'s `bootstrap()` — so `cookie-parser`, CORS, and the global `ValidationPipe` were silently absent from every e2e test until they were extracted into a shared [configure-app.ts](apps/api/src/configure-app.ts) called from both `main.ts` and each e2e test's setup. Without that fix, the login e2e test looked like it worked (login itself doesn't need cookies to be *read*) but every subsequent authenticated request silently failed, since `request.cookies` was always `undefined`.
+
+Full login → protected-route → logout → re-blocked flow verified by hand against the real running server and database (not just the automated tests) — see [auth.e2e-spec.ts](apps/api/test/e2e/auth.e2e-spec.ts) for the equivalent automated coverage.
+
+#### Two-factor authentication (TOTP)
+
+Optional per-admin, on top of the password. Uses standard TOTP (RFC 6238) — works with any compatible authenticator app (Google Authenticator, Authy, 1Password, **Okta Verify**, etc.); nothing app-specific to build, since it's an open standard.
+
+- **`admins`** gained `totp_secret`, `totp_enabled`, and `backup_codes` (bcrypt-hashed, one-time recovery codes — critical for a single-admin site, since there's no "contact support" path if the authenticator device is lost). These columns are folded directly into the `0_init` baseline in both [art_shop_schema.sql](art_shop_schema.sql) and the matching Prisma migration, rather than added as a separate migration — while the project is still pre-production and the dev DB is disposable (a Docker container), there's no history worth preserving yet, and a real `prisma migrate dev` diff against the hand-authored baseline renames indexes/FKs to Prisma's own default naming as a side effect, which is noise worth avoiding while it's still free to avoid. Once this ships anywhere with real data, schema changes go back to normal `prisma migrate dev` migrations — see the fidelity note in [schema.prisma](apps/api/prisma/schema.prisma).
+- **Enrollment** (requires an existing full session): `POST /auth/2fa/setup` generates a secret and returns a QR code (`otplib` + `qrcode`) — stored but *not yet enabled*. `POST /auth/2fa/confirm` requires the admin to submit a real code from their app, proving they scanned it correctly, before `totp_enabled` flips to `true` and backup codes are generated and returned once (only their bcrypt hashes are ever persisted). `POST /auth/2fa/disable` turns it back off.
+- **Login becomes two-step once enabled**: `POST /auth/login` with a correct password no longer sets the real session cookie — it sets a separate, short-lived (5 min) `pending_2fa_token` cookie and returns `{ requiresTwoFactor: true }`. `POST /auth/2fa/verify` exchanges a valid TOTP code (or an unused backup code) for the real `access_token` session cookie.
+- **The pending token is deliberately not just "a cookie with a different name"** — `AdminAuthGuard` explicitly rejects any token carrying a `purpose: 'pending_2fa'` claim, so even if that token ended up under the `access_token` cookie name somehow, it still could not grant a session. Cookie separation is a UX convenience here, not the actual security boundary.
+- **Okta note**: Okta Verify works as the authenticator app for free, today, with zero extra code — TOTP is a standard, and Okta Verify supports adding third-party accounts via the same QR-code flow as any other authenticator. Making Okta the *identity provider* (full OIDC/OAuth2 login delegation) was considered and rejected as disproportionate for a single admin account — that's a paid enterprise SSO product priced and designed for organizations managing many users across many apps.
+
+Full flow verified by hand against the real server, database, and real generated TOTP codes: enroll → confirm → next login pauses at `requiresTwoFactor` → pending cookie alone correctly rejected by `/auth/me` → wrong code rejected → correct code completes login → backup code works as an alternative → a used backup code is correctly rejected on reuse → disable restores password-only login. Automated as an e2e test in [auth.e2e-spec.ts](apps/api/test/e2e/auth.e2e-spec.ts) using `otplib` to generate real codes rather than mocking time/crypto.
 
 ## Feature flag: `SHOP_ENABLED`
 
@@ -266,7 +294,7 @@ Notes on the diagram:
 - FR12: Recognize a repeat buyer by email (optional `customers` row) without requiring login.
 
 ### Admin
-- FR13: Single admin login (`admins` table — no multi-role permissions needed).
+- FR13: Single admin login (`admins` table — no multi-role permissions needed). Implemented — see [Admin authentication](#admin-authentication).
 - FR14: CRUD for categories, products, and product images (manage drafts before publishing).
 - FR15: View/manage orders and their status (`pending → paid → processing → shipped → delivered`, or `cancelled` / `refunded`).
 - FR16: Toggle `SHOP_ENABLED` (admin-facing control, if the flag mechanism supports runtime toggling rather than a deploy-time env var).

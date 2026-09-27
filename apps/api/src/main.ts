@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { configureApp } from './configure-app';
 
 const logger = new Logger('Bootstrap');
 
@@ -12,18 +13,7 @@ async function bootstrap() {
   // only when something calls app.close() programmatically (as tests do).
   app.enableShutdownHooks();
 
-  app.enableCors({
-    origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
-    credentials: true,
-  });
-
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-    }),
-  );
+  configureApp(app);
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
