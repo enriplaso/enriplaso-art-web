@@ -21,6 +21,7 @@ type MockPrisma = {
     findFirst: Mock;
   };
   $transaction: Mock;
+  $queryRaw: Mock;
 };
 
 function createMockPrisma(): MockPrisma {
@@ -39,6 +40,7 @@ function createMockPrisma(): MockPrisma {
       findFirst: vi.fn(),
     },
     $transaction: vi.fn((arg: unknown[]) => Promise.all(arg)),
+    $queryRaw: vi.fn(),
   };
 }
 
@@ -150,6 +152,79 @@ describe('ProductsService', () => {
           take: 10,
         }),
       );
+    });
+
+    describe('search', () => {
+      it('returns no results without querying the ranking SQL when nothing matches the structural filters', async () => {
+        prisma.product.findMany.mockResolvedValue([]);
+
+        const result = await service.findPublished({ search: 'cat' });
+
+        expect(result).toEqual({ data: [], page: 1, pageSize: 24, total: 0 });
+        expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      });
+
+      it('finds candidates via the same structural filters as the non-search path', async () => {
+        prisma.product.findMany
+          .mockResolvedValueOnce([{ id: 'p1' }]) // candidate lookup
+          .mockResolvedValueOnce([buildProduct()]); // final page fetch
+        prisma.$queryRaw.mockResolvedValue([{ id: 'p1', relevance: 0.9 }]);
+
+        await service.findPublished({
+          search: 'cat',
+          categorySlug: 'abstract',
+        });
+
+        expect(prisma.product.findMany).toHaveBeenNthCalledWith(1, {
+          where: {
+            status: ProductStatus.published,
+            category: { slug: 'abstract' },
+          },
+          select: { id: true },
+        });
+      });
+
+      it('orders the response to match the SQL relevance ranking, not the DB fetch order', async () => {
+        prisma.product.findMany
+          .mockResolvedValueOnce([{ id: 'p1' }, { id: 'p2' }])
+          .mockResolvedValueOnce([
+            buildProduct({ id: 'p2', slug: 'less-relevant' }),
+            buildProduct({ id: 'p1', slug: 'more-relevant' }),
+          ]);
+        prisma.$queryRaw.mockResolvedValue([
+          { id: 'p1', relevance: 0.9 },
+          { id: 'p2', relevance: 0.4 },
+        ]);
+
+        const result = await service.findPublished({ search: 'cat' });
+
+        expect(result.data.map((p) => p.slug)).toEqual([
+          'more-relevant',
+          'less-relevant',
+        ]);
+        expect(result.total).toBe(2);
+      });
+
+      it('paginates the ranked results in memory', async () => {
+        const ids = ['p1', 'p2', 'p3'];
+        prisma.product.findMany
+          .mockResolvedValueOnce(ids.map((id) => ({ id })))
+          .mockResolvedValueOnce([
+            buildProduct({ id: 'p2', slug: 'page-2-item' }),
+          ]);
+        prisma.$queryRaw.mockResolvedValue(
+          ids.map((id, i) => ({ id, relevance: 1 - i * 0.1 })),
+        );
+
+        const result = await service.findPublished({
+          search: 'cat',
+          page: 2,
+          pageSize: 1,
+        });
+
+        expect(result.total).toBe(3);
+        expect(result.data.map((p) => p.slug)).toEqual(['page-2-item']);
+      });
     });
 
     it('falls back to the default locale when the requested locale has no translation', async () => {

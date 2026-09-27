@@ -18,6 +18,7 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS citext;    -- case-insensitive email
+CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- fuzzy/typo-tolerant product search
 
 -- ========================= ENUMS =========================
 
@@ -131,6 +132,13 @@ CREATE INDEX idx_products_status       ON products(status);
 CREATE INDEX idx_products_category     ON products(category_id);
 CREATE INDEX idx_products_tags         ON products USING gin (tags);
 
+-- Trigram indexes back the fuzzy/typo-tolerant search (README's "Search"
+-- section) — the `%` similarity operator and similarity() ranking function
+-- both come from pg_trgm.
+CREATE INDEX idx_products_title_trgm  ON products USING gin (title gin_trgm_ops);
+CREATE INDEX idx_products_medium_trgm ON products USING gin (medium gin_trgm_ops);
+CREATE INDEX idx_products_style_trgm  ON products USING gin (style gin_trgm_ops);
+
 CREATE TABLE product_translations (
     product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     locale_code  TEXT NOT NULL REFERENCES locales(code) ON DELETE RESTRICT,
@@ -139,6 +147,8 @@ CREATE TABLE product_translations (
 );
 
 CREATE INDEX idx_product_translations_locale ON product_translations(locale_code);
+CREATE INDEX idx_product_translations_description_trgm
+    ON product_translations USING gin (description gin_trgm_ops);
 
 -- ========================= PRODUCT IMAGES =========================
 

@@ -28,7 +28,7 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
-  extensions = [pgcrypto, citext]
+  extensions = [pgcrypto, citext, pg_trgm]
 }
 
 // ========================= ENUMS =========================
@@ -186,6 +186,9 @@ model Product {
 
   // CHECK (price_cents >= 0), CHECK (quantity_available >= 0), and
   // CHECK unique_items_capped_at_one live only in the SQL migration.
+  // Same for the gin_trgm_ops trigram indexes on title/medium/style
+  // (fuzzy search, see README's "Search" section) — Prisma's @@index
+  // doesn't support a custom operator class, so those are SQL-only too.
 
   @@index([status])
   @@index([categoryId])
@@ -200,6 +203,9 @@ model ProductTranslation {
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   locale  Locale  @relation(fields: [localeCode], references: [code], onDelete: Restrict)
+
+  // gin_trgm_ops trigram index on description (fuzzy search) is SQL-only —
+  // see the matching note on the Product model.
 
   @@id([productId, localeCode])
   @@index([localeCode])

@@ -32,11 +32,25 @@ export class ProductsService {
     const defaultLocale = await this.getDefaultLocaleCode();
     const locale = query.locale ?? defaultLocale;
 
+    // status/categorySlug/tag only — search is handled separately below,
+    // since ranking by fuzzy-match relevance needs raw SQL (Prisma has no
+    // pg_trgm operators), which can't share a query with these filters.
     const where: Prisma.ProductWhereInput = {
       status: ProductStatus.published,
       ...(query.categorySlug && { category: { slug: query.categorySlug } }),
       ...(query.tag && { tags: { has: query.tag } }),
     };
+
+    if (query.search) {
+      return this.findPublishedBySearch(
+        where,
+        query.search,
+        locale,
+        defaultLocale,
+        page,
+        pageSize,
+      );
+    }
 
     const [products, total] = await this.prisma.$transaction([
       this.prisma.product.findMany({
@@ -51,6 +65,98 @@ export class ProductsService {
 
     return {
       data: products.map((p) => this.toResponse(p, locale, defaultLocale)),
+      page,
+      pageSize,
+      total,
+    };
+  }
+
+  /**
+   * Fuzzy/typo-tolerant search (README's "Search" section). Two phases:
+   *  1. Prisma finds candidate IDs matching the structural filters
+   *     (status/category/tag) — reuses the exact same `where` as the
+   *     non-search path, so that filtering logic isn't duplicated in SQL.
+   *  2. Raw SQL ranks those candidates by pg_trgm's word_similarity()
+   *     across title/medium/style/description, combined with a plain
+   *     ILIKE check so exact/substring matches are never missed.
+   *
+   *     word_similarity() (not plain similarity()/`%`) is deliberate:
+   *     plain similarity() compares the *whole* field against the search
+   *     term, so it degrades fast once the field is longer than the term
+   *     — e.g. similarity('Golden Sunset Hour', 'sunst') ≈ 0.19, below
+   *     the 0.3 default threshold, even though "sunst" is clearly a typo
+   *     of a word actually in the title. word_similarity() instead finds
+   *     the best-matching word-length substring, so the same example
+   *     scores ≈ 0.67 — verified against the real database before
+   *     picking this, not assumed.
+   * The candidate set is small (this catalog's whole scale), so ranking
+   * and pagination happen in JS rather than pushing OFFSET/LIMIT into the
+   * raw query — simpler, and fine at this size.
+   */
+  private async findPublishedBySearch(
+    structuralWhere: Prisma.ProductWhereInput,
+    term: string,
+    locale: string,
+    defaultLocale: string,
+    page: number,
+    pageSize: number,
+  ) {
+    const candidates = await this.prisma.product.findMany({
+      where: structuralWhere,
+      select: { id: true },
+    });
+    const candidateIds = candidates.map((c) => c.id);
+
+    if (candidateIds.length === 0) {
+      return { data: [], page, pageSize, total: 0 };
+    }
+
+    const pattern = `%${term}%`;
+    const ranked = await this.prisma.$queryRaw<
+      { id: string; relevance: number }[]
+    >`
+      SELECT p.id AS id,
+        GREATEST(
+          word_similarity(${term}, p.title),
+          word_similarity(${term}, coalesce(p.medium, '')),
+          word_similarity(${term}, coalesce(p.style, '')),
+          word_similarity(${term}, coalesce(pt.description, ''))
+        ) AS relevance
+      FROM products p
+      LEFT JOIN product_translations pt
+        ON pt.product_id = p.id AND pt.locale_code = ${locale}
+      WHERE p.id::text IN (${Prisma.join(candidateIds)})
+        AND (
+          p.title ILIKE ${pattern} OR ${term} <% p.title
+          OR p.medium ILIKE ${pattern} OR ${term} <% p.medium
+          OR p.style ILIKE ${pattern} OR ${term} <% p.style
+          OR (pt.description ILIKE ${pattern} OR ${term} <% pt.description)
+        )
+      ORDER BY relevance DESC
+    `;
+
+    const total = ranked.length;
+    const start = (page - 1) * pageSize;
+    const pageIds = ranked.slice(start, start + pageSize).map((r) => r.id);
+
+    if (pageIds.length === 0) {
+      return { data: [], page, pageSize, total };
+    }
+
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: pageIds } },
+      include: PRODUCT_WITH_RELATIONS,
+    });
+
+    // findMany's `id: { in: ... }` doesn't preserve order, so re-sort to
+    // match the relevance ranking computed above.
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const ordered = pageIds
+      .map((id) => byId.get(id))
+      .filter((p): p is ProductWithRelations => p !== undefined);
+
+    return {
+      data: ordered.map((p) => this.toResponse(p, locale, defaultLocale)),
       page,
       pageSize,
       total,

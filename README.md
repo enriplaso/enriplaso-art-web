@@ -296,7 +296,7 @@ Notes on the diagram:
 ### Portfolio (always on)
 - FR1: List published artworks in a gallery view, with images, title, medium, style, dimensions, year. Single-artist site — no per-artwork artist attribution needed; artist bio/info is a site-wide "About" page, not part of the product data.
 - FR2: Artwork detail page per product.
-- FR3: Browse/filter by category and tags. No search box planned at current catalog size (<200 pieces) — revisit if the catalog grows substantially.
+- FR3: Browse/filter by category and tags, plus keyword search (`?search=`) across title, medium, style, and description. Implemented — see [Search](#search).
 - FR4: No price or purchase affordance visible while `SHOP_ENABLED = false`.
 
 ### Shop (gated by `SHOP_ENABLED`)
@@ -332,6 +332,23 @@ Notes on the diagram:
 - FR24: Admin can approve/reject a return request, mark it received, and record the physical item's disposition (relisted vs. archived as damaged).
 - FR25: Approving a return issues a refund via the payment provider and updates `payments.status` (`refunded`/`partially_refunded`) and `orders.status` (`refunded`) accordingly.
 - FR26: A relisted returned item goes back to `products.status = 'published'`; a damaged one goes to `'archived'` rather than being resold.
+
+## Search
+
+`GET /products?search=` matches against `products.title`, `products.medium`, `products.style`, and the *current-locale* `product_translations.description` — see [products.service.ts](apps/api/src/products/products.service.ts). Draft/archived products never match, same as every other `findPublished` filter.
+
+This started as plain, case-insensitive substring matching (`ILIKE`) — the right amount of complexity for a catalog this small, since a sequential scan on a few hundred rows is low-single-digit milliseconds regardless of indexing. It's since been upgraded to also tolerate typos, via **pg_trgm**, once there was an actual reason to (this reverses an even earlier decision — `pg_trgm` had been removed from the schema entirely for being unneeded at a single-artist site's scale).
+
+**How the fuzzy matching actually works** — and a real wrong turn worth documenting, not glossing over:
+
+- Every candidate is checked against **both** a plain `ILIKE` substring match **and** `pg_trgm`'s `word_similarity()`, combined with `OR`. Both are needed: `ILIKE` still catches exact/short-term matches that trigram similarity handles weakly (a 3-character term like "cat" has very few trigrams to compare), while `word_similarity()` adds tolerance for actual misspellings.
+- The first implementation used plain `similarity()` (whole-field comparison) with the standard `%` operator — the same thing most `pg_trgm` examples show. Checking it against the real database *before* committing to it surfaced a real problem: `similarity('Golden Sunset Hour', 'sunst')` scores only ≈0.19, **below** the 0.3 default match threshold, because `similarity()` compares the entire field against the entire search term, and a short typo'd word gets diluted once the field is longer than a couple of words. So a typo in a real (multi-word) title would have silently failed to match.
+- The fix was switching to **`word_similarity()`** (and its `<%` operator) instead, which finds the best-matching word-length substring within the longer field rather than comparing whole strings — `word_similarity('sunst', 'Golden Sunset Hour')` scores ≈0.67, comfortably above threshold. Verified directly against Postgres for both the failing and working versions before writing any application code, not assumed from how `pg_trgm` examples are usually written.
+- Trigram indexes (`gin_trgm_ops`) on `products.title`/`medium`/`style` and `product_translations.description` back this — see [art_shop_schema.sql](art_shop_schema.sql). Prisma's `@@index` can't express a custom GIN operator class, so, like the CHECK constraints and partial unique indexes noted in [schema.prisma](apps/api/prisma/schema.prisma)'s fidelity note, these live in the SQL migration only.
+- **Query shape**: Prisma has no `pg_trgm` operators in its query DSL, so this is implemented as raw SQL (`$queryRaw`, always the safe tagged-template form — see [Backend architecture](#backend-architecture)), but only for the relevance ranking. The structural filters (`status`/`categorySlug`/`tag`) still go through the same Prisma `where` object as the non-search path — first as a query for candidate IDs, then the raw SQL ranks and filters just those candidates by relevance, then a final `findMany` re-fetches the matching page with its relations (translations/images/category) included. This avoids re-implementing the category/tag filtering logic twice. The candidate set is this catalog's whole scale, so pagination happens by slicing the ranked list in JS rather than pushing `OFFSET`/`LIMIT` into the raw query.
+- **A second real bug** the e2e run (not the manual `psql` check) caught: `p.id IN (${Prisma.join(candidateIds)})` failed with `operator does not exist: uuid = text`, since Prisma interpolates the candidate IDs as `text` parameters against a `uuid` column. Fixed with an explicit `p.id::text IN (...)` cast. This is exactly why the manual verification against a literal SQL subquery wasn't sufficient on its own — Prisma's actual parameter binding behaves differently, and only running it through the real code path caught it.
+
+Verified against the real database in [products-search.e2e-spec.ts](apps/api/test/e2e/products-search.e2e-spec.ts): case-insensitive substring matching on title/medium/style/description independently, a British/American spelling variant with **no shared substring at all** (`watercolour` finding `Watercolor`), a misspelled word found *inside* a longer title (`sunst` finding "Golden Sunset Hour" — the exact case that broke with plain `similarity()`), and that draft products never appear regardless of match.
 
 ## Payments
 
