@@ -66,6 +66,20 @@ npm run dev
 ```
 `docker-compose.yml` at the repo root runs a single `postgres:16-alpine` container for local development only — it is not a production database setup (see [Open questions](#open-questions) for managed hosting). Both `npm install`, `prisma generate`, and both apps' builds/lints have been verified to run clean as of this scaffold; `docker compose up`/`prisma migrate deploy`/`start:dev` are untested in this environment (no running Docker daemon available here) but use standard, well-tested tooling.
 
+### Backend architecture
+
+`apps/api` follows a **layered architecture**, organized as NestJS feature modules (one per domain area — `ProductsModule`, `OrdersModule`, `PaymentsModule`, `ReturnsModule`, `PagesModule`, `AdminModule`, etc.), each with the same three layers:
+
+| Layer | Responsibility | Example |
+|---|---|---|
+| **Controller** | HTTP only — routes, request/response shape, DTO validation (`class-validator`). No business logic. | `OrdersController` exposes `POST /orders`, delegates immediately to the service. |
+| **Service** | Business logic and workflow. This is where the actual rules from the Functional requirements live. | `OrdersService` implements the reserve → pay → sold flow (FR8–FR11); `ReturnsService` implements the return workflow (FR23–FR26). |
+| **Persistence** | `PrismaService` (see [prisma.module.ts](apps/api/src/prisma/prisma.module.ts)) — injected into services, not into controllers. | `this.prisma.order.create({ ... })`. |
+
+**No separate composition root is needed.** NestJS's own module system already fills that role: `NestFactory.create(AppModule)` in [main.ts](apps/api/src/main.ts), combined with `@Module()`/`@Injectable()` decorators and constructor injection, *is* the composition root — it wires every service to its dependencies (like `PrismaService`) through Nest's built-in IoC container. Hand-rolling a second, manual composition root on top would just duplicate what Nest already does declaratively, and would mean working against the framework rather than with it. The one scenario where that tradeoff would flip is if the business logic needed to be fully framework-agnostic (portable outside Nest entirely) — not a requirement here for a single-admin shop.
+
+**No separate DAO/repository layer either** — `PrismaService`'s generated, typed query methods (`prisma.product.findMany()`, etc.) already are the data-access layer; wrapping them in another pass-through class per model would add a layer with no behavior of its own. Services call `PrismaService` directly — see [prisma.service.ts](apps/api/src/prisma/prisma.service.ts) for how the client's lifecycle (connect/disconnect) is hooked into Nest's module lifecycle. The one exception is raw SQL for things Prisma's DSL can't express (e.g. the consent-state `DISTINCT ON` query) — always via `$queryRaw`'s tagged-template syntax (auto-parameterized, safe), never `$queryRawUnsafe` with a manually built string.
+
 ## Feature flag: `SHOP_ENABLED`
 
 A single flag gates all shop functionality.

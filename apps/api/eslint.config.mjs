@@ -24,4 +24,15 @@ export default tseslint.config(
       '@typescript-eslint/no-floating-promises': 'error',
     },
   },
+  {
+    // Jest's `expect.objectContaining`/mock typings are loosely typed
+    // (`any`) by design; the no-unsafe-* rules exist to catch untyped
+    // data leaking through production code, not test doubles.
+    files: ['**/*.spec.ts', 'test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
+    },
+  },
 );
