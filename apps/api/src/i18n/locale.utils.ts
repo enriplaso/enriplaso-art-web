@@ -11,6 +11,29 @@ export async function getDefaultLocaleCode(
   return locale.code;
 }
 
+// Checked up front so an unknown code is a clear 400 naming it, rather
+// than a foreign-key violation surfacing mid-transaction.
+export async function assertLocalesExist(
+  prisma: PrismaService,
+  codes: string[],
+): Promise<void> {
+  const unique = [...new Set(codes)];
+  if (unique.length === 0) {
+    return;
+  }
+  const found = await prisma.locale.findMany({
+    where: { code: { in: unique } },
+    select: { code: true },
+  });
+  const known = new Set(found.map((l) => l.code));
+  const missing = unique.filter((code) => !known.has(code));
+  if (missing.length > 0) {
+    throw new BadRequestException(
+      `Unknown locale code(s): ${missing.join(', ')}`,
+    );
+  }
+}
+
 /**
  * The translation for the requested locale, falling back to the default
  * locale when that one is missing (README NFR5).

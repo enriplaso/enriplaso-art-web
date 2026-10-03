@@ -31,8 +31,12 @@ type MockPrisma = {
   productTranslation: {
     upsert: Mock;
   };
+  productImageTranslation: {
+    upsert: Mock;
+  };
   locale: {
     findFirst: Mock;
+    findMany: Mock;
   };
   $transaction: Mock;
   $queryRaw: Mock;
@@ -65,8 +69,12 @@ function createMockPrisma(): MockPrisma {
     productTranslation: {
       upsert: vi.fn(),
     },
+    productImageTranslation: {
+      upsert: vi.fn(),
+    },
     locale: {
       findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
@@ -137,7 +145,7 @@ function buildProduct(overrides: Record<string, any> = {}) {
         id: 'img1',
         productId: 'p1',
         url: 'https://x/1.jpg',
-        altText: null,
+        translations: [],
         position: 0,
         isPrimary: true,
         createdAt: new Date(),
@@ -332,7 +340,7 @@ describe('ProductsService', () => {
             {
               id: 'a',
               url: 'https://x/a.jpg',
-              altText: null,
+              translations: [],
               position: 0,
               isPrimary: false,
               productId: 'p1',
@@ -341,7 +349,7 @@ describe('ProductsService', () => {
             {
               id: 'b',
               url: 'https://x/b.jpg',
-              altText: null,
+              translations: [],
               position: 1,
               isPrimary: false,
               productId: 'p1',
@@ -354,6 +362,46 @@ describe('ProductsService', () => {
       const result = await service.findBySlug('sunset-oil');
 
       expect(result.primaryImageUrl).toBe('https://x/a.jpg');
+    });
+
+    it("returns image alt text in the requested locale, falling back to the default's", async () => {
+      const imageBase = {
+        productId: 'p1',
+        position: 0,
+        isPrimary: false,
+        createdAt: new Date(),
+      };
+      prisma.product.findUnique.mockResolvedValue(
+        buildProduct({
+          images: [
+            {
+              ...imageBase,
+              id: 'translated',
+              url: 'https://x/a.jpg',
+              translations: [
+                { imageId: 'translated', localeCode: 'en', altText: 'A cat' },
+                { imageId: 'translated', localeCode: 'es', altText: 'Un gato' },
+              ],
+            },
+            {
+              ...imageBase,
+              id: 'english-only',
+              url: 'https://x/b.jpg',
+              position: 1,
+              translations: [
+                { imageId: 'english-only', localeCode: 'en', altText: 'A dog' },
+              ],
+            },
+          ],
+        }),
+      );
+
+      const result = await service.findBySlug('sunset-oil', 'es');
+
+      expect(result.images.map((img) => img.altText)).toEqual([
+        'Un gato',
+        'A dog',
+      ]);
     });
   });
 
@@ -514,12 +562,29 @@ describe('ProductsService', () => {
           data: expect.objectContaining({
             productId: 'p1',
             url: 'https://cdn/x/key.png',
-            altText: 'A cat painting',
             isPrimary: false,
             position: 0,
+            // Upload alt text becomes the default-locale translation.
+            translations: {
+              create: [{ localeCode: 'en', altText: 'A cat painting' }],
+            },
           }),
         }),
       );
+    });
+
+    it('creates no translation row when no alt text is given', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/key.png');
+      prisma.productImage.count.mockResolvedValue(0);
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+
+      await service.addImage('p1', file, {});
+
+      const createArg = prisma.productImage.create.mock.calls[0]?.[0] as {
+        data: { translations?: unknown };
+      };
+      expect(createArg.data.translations).toBeUndefined();
     });
 
     it('unsets the previous primary image when the new one is marked primary', async () => {
@@ -689,6 +754,115 @@ describe('ProductsService', () => {
         'Connection terminated unexpectedly',
       );
       expect(storage.deleteObjectByUrl).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateImage', () => {
+    const image = {
+      id: 'img1',
+      productId: 'p1',
+      url: 'https://cdn/x/key.png',
+      isPrimary: false,
+      position: 2,
+    };
+
+    beforeEach(() => {
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+    });
+
+    it('throws NotFoundException when the image does not exist', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(null);
+
+      await expect(service.updateImage('p1', 'img1', {})).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the image belongs to a different product', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        ...image,
+        productId: 'other-product',
+      });
+
+      await expect(service.updateImage('p1', 'img1', {})).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unknown locale code with a 400 naming it, before writing anything', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(image);
+      prisma.locale.findMany.mockResolvedValue([{ code: 'en' }]);
+
+      await expect(
+        service.updateImage('p1', 'img1', {
+          translations: [
+            { localeCode: 'en', altText: 'A cat' },
+            { localeCode: 'xx', altText: '???' },
+          ],
+        }),
+      ).rejects.toThrow('Unknown locale code(s): xx');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('upserts only the locales sent, without touching position or primary', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(image);
+      prisma.locale.findMany.mockResolvedValue([{ code: 'es' }]);
+
+      await service.updateImage('p1', 'img1', {
+        translations: [{ localeCode: 'es', altText: 'Un gato' }],
+      });
+
+      expect(prisma.productImageTranslation.upsert).toHaveBeenCalledTimes(1);
+      expect(prisma.productImageTranslation.upsert).toHaveBeenCalledWith({
+        where: { imageId_localeCode: { imageId: 'img1', localeCode: 'es' } },
+        create: { imageId: 'img1', localeCode: 'es', altText: 'Un gato' },
+        update: { altText: 'Un gato' },
+      });
+      expect(prisma.productImage.update).not.toHaveBeenCalled();
+      expect(prisma.productImage.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('updates position alone without demoting anything', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(image);
+
+      await service.updateImage('p1', 'img1', { position: 0 });
+
+      expect(prisma.productImage.update).toHaveBeenCalledWith({
+        where: { id: 'img1' },
+        data: { position: 0 },
+      });
+      expect(prisma.productImage.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('promoting to primary demotes the current primary, excluding itself', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(image);
+
+      await service.updateImage('p1', 'img1', { isPrimary: true });
+
+      expect(prisma.productImage.updateMany).toHaveBeenCalledWith({
+        where: { productId: 'p1', isPrimary: true, NOT: { id: 'img1' } },
+        data: { isPrimary: false },
+      });
+      expect(prisma.productImage.update).toHaveBeenCalledWith({
+        where: { id: 'img1' },
+        data: { isPrimary: true },
+      });
+    });
+
+    it('maps a concurrent-primary race (P2002) to a 409', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(image);
+      prisma.productImage.update.mockImplementation(() => {
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on the fields: (`product_id`)',
+          { code: 'P2002', clientVersion: '5.22.0' },
+        );
+      });
+
+      await expect(
+        service.updateImage('p1', 'img1', { isPrimary: true }),
+      ).rejects.toThrow(ConflictException);
     });
   });
 

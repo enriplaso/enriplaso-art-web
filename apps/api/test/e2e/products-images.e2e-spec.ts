@@ -262,6 +262,107 @@ describe('Product images (e2e)', () => {
     await prisma.product.delete({ where: { id: product.id } });
   });
 
+  it('edits alt text per locale, position, and primary without re-uploading', async () => {
+    const slug = `${PRODUCT_SLUG}-patch`;
+    const product = await prisma.product.create({
+      data: {
+        slug,
+        title: 'Patch test piece',
+        priceCents: 1000n,
+        status: 'published',
+      },
+    });
+    type ImagesBody = {
+      images: { id: string; url: string; altText: string | null }[];
+    };
+
+    const first = await admin
+      .post(`/products/${product.id}/images`)
+      .field('altText', 'A cat')
+      .field('isPrimary', 'true')
+      .attach('file', ONE_PIXEL_PNG, 'first.png')
+      .expect(201);
+    const firstImage = (first.body as ImagesBody).images[0]!;
+
+    const second = await admin
+      .post(`/products/${product.id}/images`)
+      .attach('file', ONE_PIXEL_PNG_V2, 'second.png')
+      .expect(201);
+    const secondImage = (second.body as ImagesBody).images.find(
+      (img) => img.id !== firstImage.id,
+    )!;
+
+    // Add Spanish alt text; the English one from the upload stays.
+    await admin
+      .patch(`/products/${product.id}/images/${firstImage.id}`)
+      .send({ translations: [{ localeCode: 'es', altText: 'Un gato' }] })
+      .expect(200);
+
+    const altTextIn = async (locale: string) => {
+      const res = await request(app.getHttpServer())
+        .get(`/products/${slug}`)
+        .query({ locale })
+        .expect(200);
+      return (res.body as ImagesBody).images.find(
+        (img) => img.id === firstImage.id,
+      )?.altText;
+    };
+    expect(await altTextIn('es')).toBe('Un gato');
+    expect(await altTextIn('en')).toBe('A cat');
+    expect(await altTextIn('de')).toBe('A cat'); // no German → default locale
+
+    // Unknown locale → 400 naming it; nothing written.
+    const bad = await admin
+      .patch(`/products/${product.id}/images/${firstImage.id}`)
+      .send({ translations: [{ localeCode: 'xx', altText: '???' }] })
+      .expect(400);
+    expect((bad.body as { message: string }).message).toContain('xx');
+
+    // Un-flagging the primary is rejected — it would leave none.
+    await admin
+      .patch(`/products/${product.id}/images/${firstImage.id}`)
+      .send({ isPrimary: false })
+      .expect(400);
+
+    // Promoting the second image demotes the first, and the file is untouched.
+    await admin
+      .patch(`/products/${product.id}/images/${secondImage.id}`)
+      .send({ isPrimary: true, position: 0 })
+      .expect(200);
+
+    const images = await prisma.productImage.findMany({
+      where: { productId: product.id },
+    });
+    const promoted = images.find((img) => img.id === secondImage.id)!;
+    expect(images.filter((img) => img.isPrimary)).toHaveLength(1);
+    expect(promoted.isPrimary).toBe(true);
+    expect(promoted.position).toBe(0);
+    expect(promoted.url).toBe(secondImage.url);
+
+    await prisma.product.delete({ where: { id: product.id } });
+  });
+
+  it('rejects an image PATCH without an admin session', async () => {
+    const product = await prisma.product.create({
+      data: {
+        slug: `${PRODUCT_SLUG}-patch-auth`,
+        title: 'Patch auth test piece',
+        priceCents: 1000n,
+        status: 'published',
+      },
+    });
+    const image = await prisma.productImage.create({
+      data: { productId: product.id, url: 'https://example.com/x.png' },
+    });
+
+    await request(app.getHttpServer())
+      .patch(`/products/${product.id}/images/${image.id}`)
+      .send({ position: 1 })
+      .expect(401);
+
+    await prisma.product.delete({ where: { id: product.id } });
+  });
+
   it('returns 404 for an image id that does not belong to the product', async () => {
     const otherProduct = await prisma.product.create({
       data: {

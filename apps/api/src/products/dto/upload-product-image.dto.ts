@@ -4,6 +4,8 @@ import { IsBoolean, IsInt, IsOptional, IsString, Min } from 'class-validator';
 // multipart/form-data fields all arrive as strings, so booleans/numbers
 // need an explicit coercion before validation runs.
 export class UploadProductImageDto {
+  // Stored as the default-locale translation; other locales are added
+  // afterwards via PATCH (multipart can't comfortably carry an array).
   @IsOptional()
   @IsString()
   altText?: string;

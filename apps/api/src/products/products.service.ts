@@ -8,7 +8,11 @@ import {
 import { randomUUID } from 'node:crypto';
 import { Prisma, ProductStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { getDefaultLocaleCode, pickTranslation } from '../i18n/locale.utils';
+import {
+  assertLocalesExist,
+  getDefaultLocaleCode,
+  pickTranslation,
+} from '../i18n/locale.utils';
 import {
   STORAGE_SERVICE,
   StorageService,
@@ -17,10 +21,11 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
 import { UploadProductImageDto } from './dto/upload-product-image.dto';
+import { UpdateProductImageDto } from './dto/update-product-image.dto';
 
 const PRODUCT_WITH_RELATIONS = {
   translations: true,
-  images: true,
+  images: { include: { translations: true } },
   category: true,
 } satisfies Prisma.ProductInclude;
 
@@ -281,6 +286,7 @@ export class ProductsService {
     dto: UploadProductImageDto,
   ) {
     await this.findByIdOrThrow(productId);
+    const defaultLocale = await this.getDefaultLocaleCode();
 
     const url = await this.storage.uploadPublicObject({
       key: this.buildImageKey(productId, file.mimetype),
@@ -305,9 +311,13 @@ export class ProductsService {
           data: {
             productId,
             url,
-            altText: dto.altText,
             isPrimary: dto.isPrimary ?? false,
             position,
+            ...(dto.altText && {
+              translations: {
+                create: [{ localeCode: defaultLocale, altText: dto.altText }],
+              },
+            }),
           },
         });
       });
@@ -315,7 +325,6 @@ export class ProductsService {
       await this.discardUploadAndRethrow(error, url);
     }
 
-    const defaultLocale = await this.getDefaultLocaleCode();
     const product = await this.prisma.product.findUniqueOrThrow({
       where: { id: productId },
       include: PRODUCT_WITH_RELATIONS,
@@ -366,6 +375,73 @@ export class ProductsService {
     }
 
     await this.storage.deleteObjectByUrl(existing.url);
+
+    const defaultLocale = await this.getDefaultLocaleCode();
+    const product = await this.prisma.product.findUniqueOrThrow({
+      where: { id: productId },
+      include: PRODUCT_WITH_RELATIONS,
+    });
+    return this.toResponse(product, defaultLocale, defaultLocale);
+  }
+
+  /**
+   * Edits an image's metadata without touching its file: per-locale alt
+   * text (upserted — locales left out are kept), position, and promoting
+   * it to primary. All writes share one transaction, so a failure part-way
+   * (e.g. the primary race) applies none of them.
+   */
+  async updateImage(
+    productId: string,
+    imageId: string,
+    dto: UpdateProductImageDto,
+  ) {
+    const image = await this.prisma.productImage.findUnique({
+      where: { id: imageId },
+    });
+    if (!image || image.productId !== productId) {
+      throw new NotFoundException(
+        `Image ${imageId} not found on product ${productId}`,
+      );
+    }
+
+    const translations = dto.translations ?? [];
+    await assertLocalesExist(
+      this.prisma,
+      translations.map((t) => t.localeCode),
+    );
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        if (dto.isPrimary) {
+          await tx.productImage.updateMany({
+            where: { productId, isPrimary: true, NOT: { id: imageId } },
+            data: { isPrimary: false },
+          });
+        }
+
+        if (dto.isPrimary || dto.position !== undefined) {
+          await tx.productImage.update({
+            where: { id: imageId },
+            data: {
+              ...(dto.isPrimary && { isPrimary: true }),
+              ...(dto.position !== undefined && { position: dto.position }),
+            },
+          });
+        }
+
+        for (const t of translations) {
+          await tx.productImageTranslation.upsert({
+            where: {
+              imageId_localeCode: { imageId, localeCode: t.localeCode },
+            },
+            create: { imageId, localeCode: t.localeCode, altText: t.altText },
+            update: { altText: t.altText },
+          });
+        }
+      });
+    } catch (error) {
+      this.rethrowPrismaError(error);
+    }
 
     const defaultLocale = await this.getDefaultLocaleCode();
     const product = await this.prisma.product.findUniqueOrThrow({
@@ -499,10 +575,13 @@ export class ProductsService {
           'Another image was just set as primary for this product — reload and try again',
         );
       }
-      // The row was deleted by another request after our existence check.
-      if (error.code === 'P2025') {
+      // The row was deleted by another request after our existence check
+      // (P2025), or a row a write references was (P2003 — locale codes are
+      // validated up front, so a foreign-key failure here means the image
+      // or product itself vanished mid-request).
+      if (error.code === 'P2025' || error.code === 'P2003') {
         throw new NotFoundException(
-          'Image was deleted by another request — reload and try again',
+          'The image or its product was deleted by another request — reload and try again',
         );
       }
     }
@@ -551,7 +630,9 @@ export class ProductsService {
       images: sortedImages.map((img) => ({
         id: img.id,
         url: img.url,
-        altText: img.altText,
+        altText:
+          pickTranslation(img.translations, locale, defaultLocale)?.altText ??
+          null,
         isPrimary: img.isPrimary,
       })),
       primaryImageUrl: primaryImage?.url ?? null,

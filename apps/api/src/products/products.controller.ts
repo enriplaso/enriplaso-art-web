@@ -23,6 +23,7 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
 import { UploadProductImageDto } from './dto/upload-product-image.dto';
+import { UpdateProductImageDto } from './dto/update-product-image.dto';
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -88,6 +89,16 @@ export class ProductsController {
     @UploadedFile(imageFileValidator()) file: Express.Multer.File,
   ) {
     return this.productsService.replaceImage(id, imageId, file);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Patch(':id/images/:imageId')
+  updateImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('imageId', ParseUUIDPipe) imageId: string,
+    @Body() dto: UpdateProductImageDto,
+  ) {
+    return this.productsService.updateImage(id, imageId, dto);
   }
 
   @UseGuards(AdminAuthGuard)

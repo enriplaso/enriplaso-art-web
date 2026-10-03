@@ -193,6 +193,11 @@ erDiagram
         text url
         bool is_primary
     }
+    PRODUCT_IMAGE_TRANSLATIONS {
+        uuid image_id "PK, FK"
+        text locale_code "PK, FK"
+        text alt_text
+    }
     PAGES {
         uuid id PK
         text slug
@@ -258,6 +263,8 @@ erDiagram
     PRODUCTS   ||--o{ PRODUCT_TRANSLATIONS  : "translated as"
     LOCALES    ||--o{ PRODUCT_TRANSLATIONS  : "locale of"
     PRODUCTS   ||--o{ PRODUCT_IMAGES    : "shows"
+    PRODUCT_IMAGES ||--o{ PRODUCT_IMAGE_TRANSLATIONS : "described as"
+    LOCALES    ||--o{ PRODUCT_IMAGE_TRANSLATIONS : "locale of"
     PRODUCTS   ||--o{ CART_ITEMS        : "added to"
     PRODUCTS   |o--o{ ORDER_ITEMS       : "sold as"
     PAGES      ||--o{ PAGE_TRANSLATIONS : "translated as"
@@ -282,6 +289,7 @@ Notes on the diagram:
 - **products** — the artworks (single-artist site — no `artist_name` column; artist bio/info lives site-wide, not per-product). Mostly one-of-a-kind (`is_unique = true`, capped at qty 1); supports editions/prints via `is_unique = false` with `quantity_available > 1`. Lifecycle: `draft → published → reserved → sold` / `archived`. `title` is a single fixed value (not translated).
 - **product_translations** — per-locale `description` for each product.
 - **product_images** — ordered gallery images per artwork, one flagged primary.
+- **product_image_translations** — per-locale alt text for each image (screen readers and image search read it in the visitor's language), falling back to the default locale like other translations.
 - **pages** / **page_translations** — editable, translated long-form content not tied to a product or category (About Me, Privacy Policy, Terms, Shipping & Returns). Same translation pattern as products/categories; admin-editable, no redeploy needed to change copy.
 - **customers** — optional, keyed by email only, no login. Lets repeat buyers be recognized without an account system.
 - **orders** — guest checkout by default (`customer_id` nullable); stores contact + shipping/billing address as JSONB snapshots.
@@ -373,9 +381,16 @@ Product photos are stored in an S3-compatible object store, not the database —
 
 Even that orphan is cleaned up when it's provably safe to: if the DB write fails with a `PrismaClientKnownRequestError` (Postgres rejected the statement, or the transaction rolled back), `addImage`/`replaceImage` delete the just-uploaded object before rethrowing (`discardUploadAndRethrow`). Ambiguous failures, such as a timeout or a dropped connection, deliberately keep the orphan: the write may have committed even though the response was lost, and deleting the object then would recreate exactly the broken-image case this ordering exists to prevent. The cleanup is best-effort, so if it fails too, the admin still gets the original `404`/`409`, not a storage error.
 
-**Error handling**: `product_images` has a partial unique index enforcing at most one `isPrimary` row per product (see [art_shop_schema.sql](art_shop_schema.sql)). `addImage` demotes the old primary and inserts the new row inside one `$transaction`, so each upload's write is atomic — but two concurrent uploads can still both try to become primary, and the loser hits that unique constraint. Without handling it, that's a plain `PrismaClientKnownRequestError` NestJS doesn't recognize, which its default exception filter turns into an opaque `500 Internal Server Error` with no useful message. `ProductsService.rethrowPrismaError` catches `P2002` and maps it to a `409 Conflict` instead, the same pattern [categories.service.ts](apps/api/src/categories/categories.service.ts) already uses for a duplicate category slug. It also maps `P2025` ("record not found") to a `404`: `replaceImage` and `removeImage` check the image exists up front, but another admin request could delete it between that check and the actual write — without the mapping, that race would also surface as a bare `500`.
+**Error handling**: `product_images` has a partial unique index enforcing at most one `isPrimary` row per product (see [art_shop_schema.sql](art_shop_schema.sql)). `addImage` demotes the old primary and inserts the new row inside one `$transaction`, so each upload's write is atomic — but two concurrent uploads can still both try to become primary, and the loser hits that unique constraint. Without handling it, that's a plain `PrismaClientKnownRequestError` NestJS doesn't recognize, which its default exception filter turns into an opaque `500 Internal Server Error` with no useful message. `ProductsService.rethrowPrismaError` catches `P2002` and maps it to a `409 Conflict` instead, the same pattern [categories.service.ts](apps/api/src/categories/categories.service.ts) already uses for a duplicate category slug. It also maps `P2025` ("record not found") to a `404`: `replaceImage`, `updateImage` and `removeImage` check the image exists up front, but another admin request could delete it between that check and the actual write — without the mapping, that race would also surface as a bare `500`. `P2003` (foreign-key violation) maps to the same `404`: locale codes are validated before writing, so a foreign-key failure at that point means the image or product itself disappeared mid-request.
 
 **Deleting the primary image promotes the next one.** `removeImage` deletes the row and, if it was the primary, picks the next image by `position` and promotes it — in the same transaction as the delete. Without this, deleting the primary image would leave the product with zero `isPrimary` rows; `toResponse`'s position-order fallback means nothing would visibly break, but the flag itself would go stale (and the next `addImage({ isPrimary: true })` would have nothing to demote, relying on the fallback instead of the flag actually being meaningful).
+
+**Editing image metadata**: `PATCH /products/:id/images/:imageId` (JSON) changes an image without touching its file:
+- `translations: [{ localeCode, altText }]` — alt text is translated (`product_image_translations`), upserted per locale; locales left out are kept, not deleted. Unknown locale codes are rejected up front with a `400` that names them, before anything is written.
+- `position`
+- `isPrimary: true` — promotes the image and demotes the current primary in the same transaction. `false` is rejected: un-flagging the primary would leave the product with none, so you change it by promoting a different image.
+
+All of these run in one transaction, so a partial failure (such as the primary race → `409`) applies nothing. Upload's `altText` field is stored as the default-locale translation, since a multipart form can't comfortably carry the array; other languages are added through this endpoint. Responses resolve `altText` for the requested locale, falling back to the default locale's.
 
 **Replacing an image file**: `PUT /products/:id/images/:imageId` swaps *only* the file behind an existing row — it takes just the file, no other fields, and updates nothing but `url` (`id`/`altText`/`isPrimary`/`position` are untouched; changing those is deliberately not this endpoint's job). That also means it never touches the primary flag, so it can't hit the one-primary-per-product constraint at all. It's distinct from an `addImage` + `removeImage` pair, which would create a new row and, if the old image was primary, trigger `removeImage`'s auto-promotion only to have the new upload immediately demote it again. Ordering follows the same fail-safe principle as `addImage`/`removeImage`: upload the new object, update the DB row to point at it, *then* delete the old object last — a mid-failure leaves at worst an orphaned old object, never a row pointing at a file that's already gone.
 
@@ -417,12 +432,13 @@ Three separate concerns, each handled in a different layer:
 | What | Where | How |
 |---|---|---|
 | Static UI text (buttons, nav, form labels, errors) | Next.js frontend | `next-intl` (or `next-i18next`) with per-locale JSON translation files. No DB involvement — these change rarely and are a developer edit, not an admin one. |
-| Editorial content (product `description`, category `name`/`description`) | Database | `product_translations` / `category_translations` tables, one row per `(entity, locale)`. Product `title` and category `slug` stay single-valued — not translated. |
+| Editorial content (product `description`, image alt text, category `name`/`description`) | Database | `product_translations` / `product_image_translations` / `category_translations` tables, one row per `(entity, locale)`. Product `title` and category `slug` stay single-valued — not translated. |
 | Long-form static pages (About Me, Privacy Policy, Terms, Shipping & Returns) | Database | `pages` / `page_translations` tables, same one-row-per-`(page, locale)` pattern. Admin-editable from the admin panel — no redeploy needed to fix a typo or update a policy. |
 | Locale-aware formatting (currency, dates) | Next.js frontend | `Intl.NumberFormat` / `Intl.DateTimeFormat`, formatting the existing `price_cents`/`currency`/timestamp values per the visitor's locale — no new data needed. |
 
 Other requirements:
 - Locales are data (`locales` table), not a hardcoded list — adding a language is an admin INSERT, not a deploy. Seeded at launch with English (`is_default`), Spanish, German, French.
+- `GET /locales` (public) returns the active locales as `{ code, name, isDefault }`, default first, so the frontend can build its language switcher and `hreflang` tags from data instead of hardcoding them. Inactive locales (`is_active = false`) are hidden; that's how a language can be prepared before it goes live. Verified against the real database in [locales.e2e-spec.ts](apps/api/test/e2e/locales.e2e-spec.ts).
 - If a translation row is missing for the visitor's locale, the app falls back to the default locale (`locales.is_default`) — the schema doesn't enforce that every locale has a row for every product/category/page.
 - URL routing is locale-prefixed (e.g. `/en/gallery`, `/es/galeria`) via Next.js's i18n routing, with `hreflang` tags linking the locale variants of a page together — needed since SEO is a priority for the public gallery (see [Tech stack](#tech-stack)).
 

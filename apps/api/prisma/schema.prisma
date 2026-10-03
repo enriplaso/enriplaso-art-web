@@ -112,9 +112,10 @@ model Locale {
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  categoryTranslations CategoryTranslation[]
-  productTranslations  ProductTranslation[]
-  pageTranslations     PageTranslation[]
+  categoryTranslations     CategoryTranslation[]
+  productTranslations      ProductTranslation[]
+  productImageTranslations ProductImageTranslation[]
+  pageTranslations         PageTranslation[]
 
   // Partial unique index (WHERE is_default) enforcing at most one
   // default locale lives only in the SQL migration — see schema note above.
@@ -216,18 +217,31 @@ model ProductImage {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   productId String   @map("product_id") @db.Uuid
   url       String
-  altText   String?  @map("alt_text")
   position  Int      @default(0)
   isPrimary Boolean  @default(false) @map("is_primary")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product      Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  translations ProductImageTranslation[]
 
   // Partial unique index (one primary image per product, WHERE is_primary)
   // lives only in the SQL migration.
 
   @@index([productId])
   @@map("product_images")
+}
+
+model ProductImageTranslation {
+  imageId    String @map("image_id") @db.Uuid
+  localeCode String @map("locale_code")
+  altText    String @map("alt_text")
+
+  image  ProductImage @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  locale Locale       @relation(fields: [localeCode], references: [code], onDelete: Restrict)
+
+  @@id([imageId, localeCode])
+  @@index([localeCode])
+  @@map("product_image_translations")
 }
 
 // ========================= STATIC PAGES (CMS-lite) =========================

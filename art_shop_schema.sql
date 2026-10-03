@@ -156,7 +156,6 @@ CREATE TABLE product_images (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_id  UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     url         TEXT NOT NULL,
-    alt_text    TEXT,
     position    INT NOT NULL DEFAULT 0,
     is_primary  BOOLEAN NOT NULL DEFAULT false,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -167,6 +166,19 @@ CREATE UNIQUE INDEX idx_one_primary_image_per_product
     ON product_images(product_id) WHERE is_primary;
 
 CREATE INDEX idx_product_images_product ON product_images(product_id);
+
+-- Alt text is translated (screen readers and image search read it in the
+-- visitor's language), same one-row-per-(entity, locale) pattern as
+-- product_translations. Falls back to the default locale when missing.
+CREATE TABLE product_image_translations (
+    image_id     UUID NOT NULL REFERENCES product_images(id) ON DELETE CASCADE,
+    locale_code  TEXT NOT NULL REFERENCES locales(code) ON DELETE RESTRICT,
+    alt_text     TEXT NOT NULL,
+    PRIMARY KEY (image_id, locale_code)
+);
+
+CREATE INDEX idx_product_image_translations_locale
+    ON product_image_translations(locale_code);
 
 -- ========================= STATIC PAGES (CMS-lite) =========================
 -- Editable, translated long-form content that isn't tied to a product or
