@@ -16,5 +16,43 @@ services:
       timeout: 5s
       retries: 10
 
+  # S3-compatible object storage for local dev/e2e. Product images are
+  # stored through a provider-agnostic StorageService (apps/api/src/storage)
+  # that speaks the S3 API — the same client code works unchanged against
+  # MinIO here, or Cloudflare R2/Backblaze B2/AWS S3 in other environments,
+  # by just changing the STORAGE_* env vars. See README's "Image storage".
+  # MinIO's own Docker Hub/quay.io images stopped allowing anonymous pulls
+  # (Oct 2025 / Sep 2026) — Chainguard mirrors the same binaries for free.
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - '9000:9000' # S3 API
+      - '9001:9001' # Web console (http://localhost:9001)
+    volumes:
+      - minio-data:/data
+
+  # One-shot: creates the bucket and makes it publicly downloadable, so
+  # local dev mirrors a production public bucket without manual setup.
+  # Retries the alias connection since it starts before minio is ready.
+  minio-init:
+    # Needs the -dev variant: the plain mc image has no shell, and the
+    # entrypoint script below needs /bin/sh.
+    image: cgr.dev/chainguard/minio-client:latest-dev
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done &&
+      (mc mb local/art-shop-images || true) &&
+      mc anonymous set download local/art-shop-images
+      "
+    restart: 'no'
+
 volumes:
   db-data:
+  minio-data:

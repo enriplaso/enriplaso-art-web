@@ -1,14 +1,22 @@
 import {
   BadRequestException,
+  ConflictException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { Prisma, ProductStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { getDefaultLocaleCode, pickTranslation } from '../i18n/locale.utils';
+import {
+  STORAGE_SERVICE,
+  StorageService,
+} from '../storage/storage.service.interface';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
+import { UploadProductImageDto } from './dto/upload-product-image.dto';
 
 const PRODUCT_WITH_RELATIONS = {
   translations: true,
@@ -24,7 +32,10 @@ const DEFAULT_PAGE_SIZE = 24;
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(STORAGE_SERVICE) private readonly storage: StorageService,
+  ) {}
 
   async findPublished(query: QueryProductsDto) {
     const page = query.page ?? 1;
@@ -249,6 +260,171 @@ export class ProductsService {
   }
 
   /**
+   * Uploads to storage before writing the DB row (not the other way
+   * round): if the DB write then fails, the result is an orphaned object
+   * in the bucket — cheap and invisible. Writing the row first and
+   * uploading second would risk the opposite: a product with an image URL
+   * that 404s, which is a visible bug. See removeImage for the mirror of
+   * this reasoning on delete.
+   *
+   * The demote-old-primary + create-new-row pair runs in one transaction,
+   * since product_images has a partial unique index enforcing at most one
+   * `isPrimary` row per product (see art_shop_schema.sql). Two concurrent
+   * uploads both marking themselves primary can still race — the
+   * transaction doesn't serialize that away, it just makes each attempt
+   * atomic — so the loser hits that unique constraint. Without the catch
+   * below, that would otherwise surface to the admin as a bare 500.
+   */
+  async addImage(
+    productId: string,
+    file: { buffer: Buffer; mimetype: string },
+    dto: UploadProductImageDto,
+  ) {
+    await this.findByIdOrThrow(productId);
+
+    const url = await this.storage.uploadPublicObject({
+      key: this.buildImageKey(productId, file.mimetype),
+      body: file.buffer,
+      contentType: file.mimetype,
+    });
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        if (dto.isPrimary) {
+          await tx.productImage.updateMany({
+            where: { productId, isPrimary: true },
+            data: { isPrimary: false },
+          });
+        }
+
+        const position =
+          dto.position ??
+          (await tx.productImage.count({ where: { productId } }));
+
+        await tx.productImage.create({
+          data: {
+            productId,
+            url,
+            altText: dto.altText,
+            isPrimary: dto.isPrimary ?? false,
+            position,
+          },
+        });
+      });
+    } catch (error) {
+      await this.discardUploadAndRethrow(error, url);
+    }
+
+    const defaultLocale = await this.getDefaultLocaleCode();
+    const product = await this.prisma.product.findUniqueOrThrow({
+      where: { id: productId },
+      include: PRODUCT_WITH_RELATIONS,
+    });
+    return this.toResponse(product, defaultLocale, defaultLocale);
+  }
+
+  /**
+   * Swaps only the file behind an existing image row — id, position,
+   * isPrimary, and altText all stay as they are. Distinct from doing an
+   * addImage + removeImage, which would create a new row and, if the old
+   * image was primary, trigger removeImage's auto-promotion only to have
+   * the new upload immediately demote it again.
+   *
+   * Ordering follows the same fail-safe principle as addImage/removeImage:
+   * upload the new object, then update the DB row to point at it, then
+   * delete the *old* object last. A mid-failure anywhere in that sequence
+   * leaves at worst an orphaned object in storage — never a row pointing
+   * at a file that's already gone.
+   */
+  async replaceImage(
+    productId: string,
+    imageId: string,
+    file: { buffer: Buffer; mimetype: string },
+  ) {
+    const existing = await this.prisma.productImage.findUnique({
+      where: { id: imageId },
+    });
+    if (!existing || existing.productId !== productId) {
+      throw new NotFoundException(
+        `Image ${imageId} not found on product ${productId}`,
+      );
+    }
+
+    const url = await this.storage.uploadPublicObject({
+      key: this.buildImageKey(productId, file.mimetype),
+      body: file.buffer,
+      contentType: file.mimetype,
+    });
+
+    try {
+      await this.prisma.productImage.update({
+        where: { id: imageId },
+        data: { url },
+      });
+    } catch (error) {
+      await this.discardUploadAndRethrow(error, url);
+    }
+
+    await this.storage.deleteObjectByUrl(existing.url);
+
+    const defaultLocale = await this.getDefaultLocaleCode();
+    const product = await this.prisma.product.findUniqueOrThrow({
+      where: { id: productId },
+      include: PRODUCT_WITH_RELATIONS,
+    });
+    return this.toResponse(product, defaultLocale, defaultLocale);
+  }
+
+  /**
+   * Deletes from storage before the DB row — the reverse order of
+   * addImage, for the same reason: if the DB delete then fails, you're
+   * left with a dangling row pointing at nothing (visible broken image),
+   * versus a DB row deleted but the object still in the bucket (cheap,
+   * invisible, and never reachable again since nothing references its URL).
+   *
+   * If the deleted image was the primary one, the next image by position
+   * is promoted in the same transaction as the delete — otherwise the
+   * product would silently end up with zero `isPrimary` rows. toResponse
+   * already falls back to position order when nothing is flagged primary,
+   * so this isn't needed for correct display, but leaving isPrimary unset
+   * after a delete would make the flag itself misleading going forward
+   * (e.g. the next addImage({isPrimary: true}) would have nothing to demote).
+   */
+  async removeImage(productId: string, imageId: string) {
+    const image = await this.prisma.productImage.findUnique({
+      where: { id: imageId },
+    });
+    if (!image || image.productId !== productId) {
+      throw new NotFoundException(
+        `Image ${imageId} not found on product ${productId}`,
+      );
+    }
+
+    await this.storage.deleteObjectByUrl(image.url);
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.productImage.delete({ where: { id: imageId } });
+
+        if (image.isPrimary) {
+          const next = await tx.productImage.findFirst({
+            where: { productId },
+            orderBy: { position: 'asc' },
+          });
+          if (next) {
+            await tx.productImage.update({
+              where: { id: next.id },
+              data: { isPrimary: true },
+            });
+          }
+        }
+      });
+    } catch (error) {
+      this.rethrowPrismaError(error);
+    }
+  }
+
+  /**
    * Soft delete: products are mostly one-of-a-kind originals, so this
    * archives rather than removing the row (art_shop_schema.sql already
    * models 'archived' as a first-class product_status).
@@ -282,6 +458,55 @@ export class ProductsService {
 
   private getDefaultLocaleCode(): Promise<string> {
     return getDefaultLocaleCode(this.prisma);
+  }
+
+  private buildImageKey(productId: string, mimetype: string): string {
+    const extension = mimetype.split('/')[1] ?? 'bin';
+    return `products/${productId}/${randomUUID()}.${extension}`;
+  }
+
+  /**
+   * Deletes a just-uploaded object when the DB write that would have
+   * referenced it is known not to have happened, then rethrows. Only a
+   * PrismaClientKnownRequestError guarantees that (Postgres rejected the
+   * statement / the transaction rolled back). Ambiguous failures — a
+   * timeout or dropped connection — may have committed anyway, and
+   * deleting the object then would leave a row pointing at a missing file,
+   * so those keep the orphan instead. A failed cleanup is swallowed so the
+   * caller still gets the original error, not a storage error.
+   */
+  private async discardUploadAndRethrow(
+    error: unknown,
+    url: string,
+  ): Promise<never> {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      try {
+        await this.storage.deleteObjectByUrl(url);
+      } catch {
+        // Best effort: an orphan is acceptable, masking `error` is not.
+      }
+    }
+    this.rethrowPrismaError(error);
+  }
+
+  // Maps the Prisma errors image writes can realistically hit under
+  // concurrent admin requests; anything else is rethrown untouched.
+  private rethrowPrismaError(error: unknown): never {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      // Partial unique index: at most one isPrimary image per product.
+      if (error.code === 'P2002') {
+        throw new ConflictException(
+          'Another image was just set as primary for this product — reload and try again',
+        );
+      }
+      // The row was deleted by another request after our existence check.
+      if (error.code === 'P2025') {
+        throw new NotFoundException(
+          'Image was deleted by another request — reload and try again',
+        );
+      }
+    }
+    throw error;
   }
 
   private toResponse(

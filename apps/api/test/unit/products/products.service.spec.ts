@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { ProductStatus } from '@prisma/client';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma, ProductStatus } from '@prisma/client';
 import { PrismaService } from '../../../src/prisma/prisma.service';
 import { ProductsService } from '../../../src/products/products.service';
 import { CreateProductDto } from '../../../src/products/dto/create-product.dto';
@@ -11,8 +15,18 @@ type MockPrisma = {
     findMany: Mock;
     count: Mock;
     findUnique: Mock;
+    findUniqueOrThrow: Mock;
     create: Mock;
     update: Mock;
+  };
+  productImage: {
+    findUnique: Mock;
+    findFirst: Mock;
+    create: Mock;
+    update: Mock;
+    updateMany: Mock;
+    delete: Mock;
+    count: Mock;
   };
   productTranslation: {
     upsert: Mock;
@@ -24,14 +38,29 @@ type MockPrisma = {
   $queryRaw: Mock;
 };
 
+type MockStorage = {
+  uploadPublicObject: Mock;
+  deleteObjectByUrl: Mock;
+};
+
 function createMockPrisma(): MockPrisma {
-  return {
+  const prisma = {
     product: {
       findMany: vi.fn(),
       count: vi.fn(),
       findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+    },
+    productImage: {
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      count: vi.fn(),
     },
     productTranslation: {
       upsert: vi.fn(),
@@ -39,8 +68,28 @@ function createMockPrisma(): MockPrisma {
     locale: {
       findFirst: vi.fn(),
     },
-    $transaction: vi.fn((arg: unknown[]) => Promise.all(arg)),
+    $transaction: vi.fn(),
     $queryRaw: vi.fn(),
+  } satisfies MockPrisma;
+
+  // Supports both the array form ($transaction([...])) and the interactive
+  // callback form ($transaction(async (tx) => ...)) — addImage uses the
+  // latter, findPublished's search path uses the former. The callback gets
+  // the mock itself as `tx`, so assertions against prisma.productImage.*
+  // see the writes made inside the transaction.
+  prisma.$transaction.mockImplementation((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: typeof prisma) => unknown)(prisma)
+      : Promise.all(arg as unknown[]),
+  );
+
+  return prisma;
+}
+
+function createMockStorage(): MockStorage {
+  return {
+    uploadPublicObject: vi.fn(),
+    deleteObjectByUrl: vi.fn(),
   };
 }
 
@@ -102,11 +151,13 @@ function buildProduct(overrides: Record<string, any> = {}) {
 describe('ProductsService', () => {
   let service: ProductsService;
   let prisma: MockPrisma;
+  let storage: MockStorage;
 
   beforeEach(() => {
     prisma = createMockPrisma();
+    storage = createMockStorage();
     prisma.locale.findFirst.mockResolvedValue(DEFAULT_LOCALE);
-    service = new ProductsService(prisma as unknown as PrismaService);
+    service = new ProductsService(prisma as unknown as PrismaService, storage);
   });
 
   describe('findPublished', () => {
@@ -423,6 +474,339 @@ describe('ProductsService', () => {
       };
       expect(callArg.data.priceCents).toBeUndefined();
       expect(callArg.data.title).toBe('New title');
+    });
+  });
+
+  describe('addImage', () => {
+    const file = { buffer: Buffer.from('fake-bytes'), mimetype: 'image/png' };
+
+    it('throws NotFoundException if the product does not exist', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(service.addImage('missing', file, {})).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.uploadPublicObject).not.toHaveBeenCalled();
+    });
+
+    it('uploads to storage before writing the DB row, keyed under the product id', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/key.png');
+      prisma.productImage.count.mockResolvedValue(0);
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+
+      await service.addImage('p1', file, { altText: 'A cat painting' });
+
+      expect(storage.uploadPublicObject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: expect.stringMatching(/^products\/p1\/.+\.png$/),
+          body: file.buffer,
+          contentType: 'image/png',
+        }),
+      );
+      const uploadOrder =
+        storage.uploadPublicObject.mock.invocationCallOrder[0]!;
+      const createOrder =
+        prisma.productImage.create.mock.invocationCallOrder[0]!;
+      expect(uploadOrder).toBeLessThan(createOrder);
+      expect(prisma.productImage.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            productId: 'p1',
+            url: 'https://cdn/x/key.png',
+            altText: 'A cat painting',
+            isPrimary: false,
+            position: 0,
+          }),
+        }),
+      );
+    });
+
+    it('unsets the previous primary image when the new one is marked primary', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/key.png');
+      prisma.productImage.count.mockResolvedValue(1);
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+
+      await service.addImage('p1', file, { isPrimary: true });
+
+      expect(prisma.productImage.updateMany).toHaveBeenCalledWith({
+        where: { productId: 'p1', isPrimary: true },
+        data: { isPrimary: false },
+      });
+    });
+
+    it('maps a concurrent-primary race (unique constraint) to a 409, not a bare 500', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/key.png');
+      prisma.productImage.create.mockImplementation(() => {
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on the fields: (`product_id`)',
+          { code: 'P2002', clientVersion: '5.22.0' },
+        );
+      });
+
+      await expect(
+        service.addImage('p1', file, { isPrimary: true }),
+      ).rejects.toThrow(ConflictException);
+      // The write definitely didn't happen, so the upload is cleaned up.
+      expect(storage.deleteObjectByUrl).toHaveBeenCalledWith(
+        'https://cdn/x/key.png',
+      );
+    });
+
+    it('keeps the upload when the DB failure is ambiguous (may have committed)', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/key.png');
+      prisma.productImage.count.mockResolvedValue(0);
+      prisma.productImage.create.mockRejectedValue(
+        new Error('Connection terminated unexpectedly'),
+      );
+
+      await expect(service.addImage('p1', file, {})).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      );
+      expect(storage.deleteObjectByUrl).not.toHaveBeenCalled();
+    });
+
+    it('still surfaces the original error when the cleanup itself fails', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/key.png');
+      storage.deleteObjectByUrl.mockRejectedValue(new Error('storage down'));
+      prisma.productImage.create.mockImplementation(() => {
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on the fields: (`product_id`)',
+          { code: 'P2002', clientVersion: '5.22.0' },
+        );
+      });
+
+      await expect(
+        service.addImage('p1', file, { isPrimary: true }),
+      ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('replaceImage', () => {
+    const file = { buffer: Buffer.from('new-bytes'), mimetype: 'image/webp' };
+    const existingImage = {
+      id: 'img1',
+      productId: 'p1',
+      url: 'https://cdn/x/old.png',
+      altText: 'Old alt text',
+      isPrimary: false,
+      position: 2,
+    };
+
+    it('throws NotFoundException when the image does not exist', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(null);
+
+      await expect(service.replaceImage('p1', 'img1', file)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.uploadPublicObject).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the image belongs to a different product', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        ...existingImage,
+        productId: 'other-product',
+      });
+
+      await expect(service.replaceImage('p1', 'img1', file)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.uploadPublicObject).not.toHaveBeenCalled();
+    });
+
+    it('uploads the new file, updates the row, then deletes the old object last', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(existingImage);
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/new.webp');
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+
+      await service.replaceImage('p1', 'img1', file);
+
+      expect(storage.uploadPublicObject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: expect.stringMatching(/^products\/p1\/.+\.webp$/),
+          body: file.buffer,
+          contentType: 'image/webp',
+        }),
+      );
+      const uploadOrder =
+        storage.uploadPublicObject.mock.invocationCallOrder[0]!;
+      const updateOrder =
+        prisma.productImage.update.mock.invocationCallOrder[0]!;
+      const oldDeleteOrder =
+        storage.deleteObjectByUrl.mock.invocationCallOrder[0]!;
+      expect(uploadOrder).toBeLessThan(updateOrder);
+      expect(updateOrder).toBeLessThan(oldDeleteOrder);
+      expect(storage.deleteObjectByUrl).toHaveBeenCalledWith(
+        'https://cdn/x/old.png',
+      );
+    });
+
+    it('updates only the url — never altText, isPrimary, or position', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(existingImage);
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/new.webp');
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+
+      await service.replaceImage('p1', 'img1', file);
+
+      expect(prisma.productImage.update).toHaveBeenCalledWith({
+        where: { id: 'img1' },
+        data: { url: 'https://cdn/x/new.webp' },
+      });
+      expect(prisma.productImage.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('maps the row being deleted concurrently (P2025) to a 404, discarding only the new upload', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(existingImage);
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/new.webp');
+      prisma.productImage.update.mockImplementation(() => {
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Record to update not found.',
+          { code: 'P2025', clientVersion: '5.22.0' },
+        );
+      });
+
+      await expect(service.replaceImage('p1', 'img1', file)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.deleteObjectByUrl).toHaveBeenCalledTimes(1);
+      expect(storage.deleteObjectByUrl).toHaveBeenCalledWith(
+        'https://cdn/x/new.webp',
+      );
+    });
+
+    it('keeps both objects when the DB failure is ambiguous (may have committed)', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(existingImage);
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/new.webp');
+      prisma.productImage.update.mockRejectedValue(
+        new Error('Connection terminated unexpectedly'),
+      );
+
+      await expect(service.replaceImage('p1', 'img1', file)).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      );
+      expect(storage.deleteObjectByUrl).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('removeImage', () => {
+    it('throws NotFoundException when the image does not exist', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(null);
+
+      await expect(service.removeImage('p1', 'img1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.deleteObjectByUrl).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the image belongs to a different product', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        id: 'img1',
+        productId: 'other-product',
+        url: 'https://cdn/x/key.png',
+      });
+
+      await expect(service.removeImage('p1', 'img1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.deleteObjectByUrl).not.toHaveBeenCalled();
+    });
+
+    it('deletes from storage before deleting the DB row', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        id: 'img1',
+        productId: 'p1',
+        url: 'https://cdn/x/key.png',
+      });
+
+      await service.removeImage('p1', 'img1');
+
+      const deleteStorageOrder =
+        storage.deleteObjectByUrl.mock.invocationCallOrder[0]!;
+      const deleteDbOrder =
+        prisma.productImage.delete.mock.invocationCallOrder[0]!;
+      expect(storage.deleteObjectByUrl).toHaveBeenCalledWith(
+        'https://cdn/x/key.png',
+      );
+      expect(deleteStorageOrder).toBeLessThan(deleteDbOrder);
+      expect(prisma.productImage.delete).toHaveBeenCalledWith({
+        where: { id: 'img1' },
+      });
+    });
+
+    it('does not look for a replacement primary when the deleted image was not primary', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        id: 'img1',
+        productId: 'p1',
+        url: 'https://cdn/x/key.png',
+        isPrimary: false,
+      });
+
+      await service.removeImage('p1', 'img1');
+
+      expect(prisma.productImage.findFirst).not.toHaveBeenCalled();
+      expect(prisma.productImage.update).not.toHaveBeenCalled();
+    });
+
+    it('promotes the next image by position when the deleted image was primary', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        id: 'img1',
+        productId: 'p1',
+        url: 'https://cdn/x/key.png',
+        isPrimary: true,
+      });
+      prisma.productImage.findFirst.mockResolvedValue({
+        id: 'img2',
+        productId: 'p1',
+        position: 1,
+      });
+
+      await service.removeImage('p1', 'img1');
+
+      expect(prisma.productImage.findFirst).toHaveBeenCalledWith({
+        where: { productId: 'p1' },
+        orderBy: { position: 'asc' },
+      });
+      expect(prisma.productImage.update).toHaveBeenCalledWith({
+        where: { id: 'img2' },
+        data: { isPrimary: true },
+      });
+    });
+
+    it('leaves the product with no primary image when the deleted one was primary and no images remain', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        id: 'img1',
+        productId: 'p1',
+        url: 'https://cdn/x/key.png',
+        isPrimary: true,
+      });
+      prisma.productImage.findFirst.mockResolvedValue(null);
+
+      await service.removeImage('p1', 'img1');
+
+      expect(prisma.productImage.update).not.toHaveBeenCalled();
+    });
+
+    it('maps a concurrent delete of the same image (P2025) to a 404', async () => {
+      prisma.productImage.findUnique.mockResolvedValue({
+        id: 'img1',
+        productId: 'p1',
+        url: 'https://cdn/x/key.png',
+        isPrimary: false,
+      });
+      prisma.productImage.delete.mockImplementation(() => {
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Record to delete does not exist.',
+          { code: 'P2025', clientVersion: '5.22.0' },
+        );
+      });
+
+      await expect(service.removeImage('p1', 'img1')).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 
