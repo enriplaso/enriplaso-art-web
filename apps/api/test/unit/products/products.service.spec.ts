@@ -947,6 +947,18 @@ describe('ProductsService', () => {
       );
     });
 
+    it('still succeeds when deleting the old object fails, since the swap is already committed', async () => {
+      prisma.productImage.findUnique.mockResolvedValue(existingImage);
+      storage.uploadPublicObject.mockResolvedValue('https://cdn/x/new.webp');
+      storage.deleteObjectByUrl.mockRejectedValue(new Error('storage down'));
+      prisma.product.findUniqueOrThrow.mockResolvedValue(buildProduct());
+
+      await expect(
+        service.replaceImage('p1', 'img1', file),
+      ).resolves.toBeDefined();
+      expect(prisma.productImage.update).toHaveBeenCalled();
+    });
+
     it('updates only the url — never altText, isPrimary, or position', async () => {
       prisma.productImage.findUnique.mockResolvedValue(existingImage);
       storage.uploadPublicObject.mockResolvedValue('https://cdn/x/new.webp');

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { LoggingModule } from './logging/logging.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProductsModule } from './products/products.module';
 import { HealthModule } from './health/health.module';
@@ -14,6 +15,7 @@ import { PagesModule } from './pages/pages.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    LoggingModule,
     // Generic, IP-based first layer — a complement to (not a substitute
     // for) the account-level lockout in AuthService, and to any edge-level
     // rate limiting (e.g. nginx) added later. See README's "Rate limiting"

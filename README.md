@@ -92,6 +92,49 @@ npm run dev
 
 Verified by hand: stopping the `db` container makes `/health/ready` return `503` while `/health` stays `200`; restarting `db` brings `/health/ready` back to `200` on its own, with no app restart at any point. When this gets containerized, wire a Dockerfile `HEALTHCHECK` / Kubernetes `livenessProbe` to `/health` and a `readinessProbe` to `/health/ready` — never the reverse.
 
+### Logging
+
+Structured logging with **pino**, via `nestjs-pino`, configured in [logging.module.ts](apps/api/src/logging/logging.module.ts). Pino replaces Nest's default console logger: [configure-app.ts](apps/api/src/configure-app.ts) calls `app.useLogger()`, so Nest's own startup and unhandled-exception logs and every `new Logger(SomeService.name)` in the code all go through it. Services keep using Nest's standard `Logger` from `@nestjs/common` and never import pino directly.
+
+**Output and level**
+
+| `NODE_ENV` | Format | Default level |
+|---|---|---|
+| `production` | One JSON object per line on stdout. This is what log collectors (the hosting platform's log viewer, Loki, Datadog, …) and `jq` expect. | `info` |
+| `development` | Single-line, colorized output via `pino-pretty` (a dev dependency only). | `debug` |
+| `test` | None. Tests stay quiet. | `silent` |
+
+`LOG_LEVEL` (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`) overrides the default, e.g. `LOG_LEVEL=info` to see the logs while running the e2e tests.
+
+**Request logs.** Every request produces one line when it finishes, e.g. `GET /pages/about 200`, with:
+- `req.id`: a request id, also returned to the client as the `X-Request-Id` header. An incoming `X-Request-Id` is reused, but only if it looks like an id (`[\w-]{1,64}`), because the value is client-controlled. That lets one request be followed from the Next.js server through to the API. Every log line written while handling the request carries the same id, so a service's warning can be tied to the request that caused it.
+- `req.method`, `req.url`, `req.remoteAddress`, `res.statusCode`, `responseTime` (ms).
+- `adminId` on authenticated admin requests. Together with method and URL, this is the audit trail of who changed what, which is why the individual write endpoints don't also log "product created" and the like.
+- Level by status: `5xx` → `error`, `4xx` → `warn`, everything else → `info`.
+- `/health` and `/health/ready` are not logged. The load balancer polls them every few seconds, and they would drown out everything else.
+
+**What is never logged.** Request headers (the session and pending-2FA cookies live there), request bodies (passwords, 2FA codes), and tokens or secrets. The request serializer only outputs the fields listed above. As a second layer, pino's `redact` replaces cookie and authorization headers, `set-cookie`, and any `password`, `passwordHash`, `token`, `pendingToken`, `totpSecret` or `backupCodes` field with `[redacted]`, in case one is ever logged explicitly. That covers these keys at the top level of the logged object (`logger.warn({ password }, …)`) and one level down (`logger.warn({ admin: { passwordHash } }, …)`), but not deeper: pino's `*` wildcard matches exactly one level, so it can't express "anywhere". Never log whole request bodies or deeply nested objects that could contain credentials.
+
+**Application events**
+
+| Where | Event | Level |
+|---|---|---|
+| `Bootstrap` ([main.ts](apps/api/src/main.ts)) | API listening, with the port and the `SHOP_ENABLED` value it started with | `info` |
+| `Bootstrap` | Unhandled promise rejection / uncaught exception (the latter then exits) | `error` |
+| `AuthService` | Login succeeded (password only, or 2FA), password accepted and waiting for the 2FA code, 2FA setup started, 2FA enabled | `info` |
+| `AuthService` | Login failed (unknown email, wrong password, invalid 2FA code), with the running failure count; login rejected while locked; invalid or expired pending-2FA token; 2FA confirmation failed | `warn` |
+| `AuthService` | **Backup code used to log in** (with the number of codes left), **2FA disabled** | `warn`. Either the admin lost their authenticator, or someone else has the session or a code |
+| `AuthService` | **Account locked** after too many failed attempts | `error` |
+| `ProductsService` | An uploaded image left orphaned in storage: the cleanup after a failed DB write failed, the DB failure was ambiguous so the upload was kept on purpose, or deleting the old object after a successful image replace failed | `warn` |
+| `ProductsService` | An image's object was deleted from storage, but deleting its DB row then failed, so the row now points at a missing file | `error` |
+| `PrismaService` | Disconnected from the database on shutdown | `info` |
+
+The `ProductsService` events are the reason these logs exist at all. Those paths tolerate a storage/DB mismatch on purpose and don't fail the request (see the comments in [products.service.ts](apps/api/src/products/products.service.ts)), so without logging nobody would know the mismatch happened. Searching for `orphan` in the production logs lists the objects that are safe to delete from the bucket.
+
+When the shop is built, Stripe webhooks, order state changes, reservation expiry and sale notifications (including Telegram/email failures, which must not fail the webhook) should be logged in the same way.
+
+Verified by hand against the real server: the JSON output in production, the pretty output in development, an incoming `X-Request-Id` being reused, `/health` being skipped, `adminId` appearing on authenticated requests, and a cookie sent with a request not appearing in the logs.
+
 ### Admin authentication
 
 `AuthModule` ([auth.module.ts](apps/api/src/auth/auth.module.ts)) protects every admin-only write endpoint (currently `POST`/`PATCH`/`DELETE /products`, via `@UseGuards(AdminAuthGuard)`; every future admin action follows the same pattern).

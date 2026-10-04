@@ -2,11 +2,14 @@ import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { configureApp } from './configure-app';
+import { SettingsService } from './settings/settings.service';
 
 const logger = new Logger('Bootstrap');
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // Buffered until configureApp() swaps in pino, so startup logs come out
+  // in the same format as everything else.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
 
   // Without this, Nest never listens for SIGTERM/SIGINT, so OnModuleDestroy
   // hooks (e.g. PrismaService disconnecting) never run on a real shutdown —
@@ -17,6 +20,9 @@ async function bootstrap() {
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
+  logger.log(
+    `API listening on port ${port} (SHOP_ENABLED=${app.get(SettingsService).isShopEnabled()})`,
+  );
 }
 
 // unhandledRejection: log only — usually an isolated failed async

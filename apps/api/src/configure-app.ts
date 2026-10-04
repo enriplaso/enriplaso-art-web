@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
+import { Logger } from 'nestjs-pino';
 
 /**
  * Global app configuration shared between the real server (main.ts) and
@@ -12,6 +13,10 @@ import cookieParser from 'cookie-parser';
  * saw "no token", regardless of whether login actually worked).
  */
 export function configureApp(app: INestApplication): void {
+  // Routes every Nest Logger (and Nest's own startup/exception logging)
+  // through pino — see LoggingModule.
+  app.useLogger(app.get(Logger));
+
   // Required for AdminAuthGuard to read the httpOnly auth cookie —
   // Express doesn't parse cookies into req.cookies without this.
   app.use(cookieParser());

@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -49,6 +50,11 @@ const PUBLIC_STATUSES: ProductStatus[] = [
 
 @Injectable()
 export class ProductsService {
+  // Storage/DB inconsistencies the code tolerates on purpose (orphaned
+  // objects, a failed cleanup) — they don't fail the request, so this log is
+  // the only place they show up.
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(STORAGE_SERVICE) private readonly storage: StorageService,
@@ -461,7 +467,16 @@ export class ProductsService {
       await this.discardUploadAndRethrow(error, url);
     }
 
-    await this.storage.deleteObjectByUrl(existing.url);
+    // The swap is already committed, so a failure here mustn't fail the
+    // request — the old object is just left behind as an orphan.
+    try {
+      await this.storage.deleteObjectByUrl(existing.url);
+    } catch (error) {
+      this.logger.warn(
+        { imageId, url: existing.url, err: error },
+        'Image replaced, but deleting the old object failed; orphan left in storage',
+      );
+    }
 
     const defaultLocale = await this.getDefaultLocaleCode();
     const product = await this.prisma.product.findUniqueOrThrow({
@@ -583,6 +598,10 @@ export class ProductsService {
         }
       });
     } catch (error) {
+      this.logger.error(
+        { imageId, url: image.url, err: error },
+        'Image object deleted from storage, but deleting its row failed',
+      );
       this.rethrowPrismaError(error);
     }
   }
@@ -645,9 +664,18 @@ export class ProductsService {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       try {
         await this.storage.deleteObjectByUrl(url);
-      } catch {
+      } catch (cleanupError) {
         // Best effort: an orphan is acceptable, masking `error` is not.
+        this.logger.warn(
+          { url, err: cleanupError },
+          'Discarding an upload after a failed DB write failed; orphan left in storage',
+        );
       }
+    } else {
+      this.logger.warn(
+        { url, err: error },
+        'DB write outcome unknown after upload; keeping the object in case it committed',
+      );
     }
     this.rethrowPrismaError(error);
   }

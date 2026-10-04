@@ -3,6 +3,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -32,6 +33,10 @@ type LoginResult =
 
 @Injectable()
 export class AuthService {
+  // Security events only — who logged in, failed, got locked out, or
+  // changed 2FA. Never codes, tokens, secrets, or passwords.
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
@@ -41,13 +46,14 @@ export class AuthService {
     const admin = await this.prisma.admin.findUnique({ where: { email } });
 
     if (!admin) {
+      this.logger.warn({ email }, 'Login failed: unknown email');
       throw new UnauthorizedException('Invalid email or password');
     }
 
     this.assertNotLocked(admin);
 
     if (!(await bcrypt.compare(password, admin.passwordHash))) {
-      await this.registerFailedAttempt(admin);
+      await this.registerFailedAttempt(admin, 'wrong password');
       throw new UnauthorizedException('Invalid email or password');
     }
 
@@ -59,6 +65,10 @@ export class AuthService {
       const pendingToken = await this.jwtService.signAsync(
         { sub: admin.id, purpose: PENDING_2FA_PURPOSE },
         { expiresIn: PENDING_2FA_TOKEN_EXPIRES_IN },
+      );
+      this.logger.log(
+        { adminId: admin.id },
+        'Password accepted, awaiting 2FA code',
       );
       return { requiresTwoFactor: true, pendingToken };
     }
@@ -75,6 +85,7 @@ export class AuthService {
     });
 
     const token = await this.signSessionToken(admin.id, admin.email);
+    this.logger.log({ adminId: admin.id }, 'Admin logged in (password only)');
 
     return {
       requiresTwoFactor: false,
@@ -91,10 +102,15 @@ export class AuthService {
         purpose?: string;
       }>(pendingToken);
     } catch {
+      this.logger.warn('2FA step rejected: invalid or expired pending token');
       throw new UnauthorizedException('Invalid or expired login attempt');
     }
 
     if (payload.purpose !== PENDING_2FA_PURPOSE) {
+      this.logger.warn(
+        { adminId: payload.sub },
+        '2FA step rejected: token is not a pending-2FA token',
+      );
       throw new UnauthorizedException('Invalid login attempt');
     }
 
@@ -122,7 +138,7 @@ export class AuthService {
         code,
       );
       if (matchIndex === -1) {
-        await this.registerFailedAttempt(admin);
+        await this.registerFailedAttempt(admin, 'invalid 2FA code');
         throw new UnauthorizedException('Invalid authentication code');
       }
       usedBackupCode = true;
@@ -132,6 +148,12 @@ export class AuthService {
         where: { id: admin.id },
         data: { backupCodes: remainingCodes },
       });
+      // Worth noticing: either the admin lost their authenticator, or
+      // someone else has a backup code.
+      this.logger.warn(
+        { adminId: admin.id, backupCodesRemaining: remainingCodes.length },
+        'Backup code used to log in',
+      );
     }
 
     await this.prisma.admin.update({
@@ -144,6 +166,10 @@ export class AuthService {
     });
 
     const token = await this.signSessionToken(admin.id, admin.email);
+    this.logger.log(
+      { adminId: admin.id, usedBackupCode },
+      'Admin logged in (2FA)',
+    );
 
     return {
       token,
@@ -168,6 +194,7 @@ export class AuthService {
       where: { id: adminId },
       data: { totpSecret: secret, totpEnabled: false, backupCodes: [] },
     });
+    this.logger.log({ adminId }, '2FA setup started');
 
     const otpauthUrl = authenticator.keyuri(admin.email, TOTP_ISSUER, secret);
     const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
@@ -188,6 +215,7 @@ export class AuthService {
       secret: admin.totpSecret,
     });
     if (!isValid) {
+      this.logger.warn({ adminId }, '2FA confirmation failed: invalid code');
       throw new UnauthorizedException('Invalid authentication code');
     }
 
@@ -200,6 +228,7 @@ export class AuthService {
       where: { id: adminId },
       data: { totpEnabled: true, backupCodes: hashedCodes },
     });
+    this.logger.log({ adminId }, '2FA enabled');
 
     // Plaintext codes are returned exactly once — only their bcrypt hashes
     // are ever persisted, so this is the admin's only chance to save them.
@@ -211,6 +240,9 @@ export class AuthService {
       where: { id: adminId },
       data: { totpEnabled: false, totpSecret: null, backupCodes: [] },
     });
+    // warn, not log: turning 2FA off is what an attacker with a stolen
+    // session would do first.
+    this.logger.warn({ adminId }, '2FA disabled');
     return { success: true };
   }
 
@@ -235,8 +267,15 @@ export class AuthService {
     return this.jwtService.signAsync({ sub: adminId, email });
   }
 
-  private assertNotLocked(admin: { lockedUntil: Date | null }): void {
+  private assertNotLocked(admin: {
+    id: string;
+    lockedUntil: Date | null;
+  }): void {
     if (admin.lockedUntil && admin.lockedUntil.getTime() > Date.now()) {
+      this.logger.warn(
+        { adminId: admin.id, lockedUntil: admin.lockedUntil },
+        'Login rejected: account locked',
+      );
       throw new HttpException(
         'Account temporarily locked due to too many failed attempts. Try again later.',
         HttpStatus.TOO_MANY_REQUESTS,
@@ -244,21 +283,30 @@ export class AuthService {
     }
   }
 
-  private async registerFailedAttempt(admin: {
-    id: string;
-    failedLoginAttempts: number;
-  }): Promise<void> {
+  private async registerFailedAttempt(
+    admin: { id: string; failedLoginAttempts: number },
+    reason: string,
+  ): Promise<void> {
     const attempts = admin.failedLoginAttempts + 1;
+    const lockedUntil =
+      attempts >= MAX_FAILED_LOGIN_ATTEMPTS
+        ? new Date(Date.now() + LOCKOUT_DURATION_MS)
+        : null;
     await this.prisma.admin.update({
       where: { id: admin.id },
-      data: {
-        failedLoginAttempts: attempts,
-        lockedUntil:
-          attempts >= MAX_FAILED_LOGIN_ATTEMPTS
-            ? new Date(Date.now() + LOCKOUT_DURATION_MS)
-            : null,
-      },
+      data: { failedLoginAttempts: attempts, lockedUntil },
     });
+
+    this.logger.warn(
+      { adminId: admin.id, failedAttempts: attempts },
+      `Login failed: ${reason}`,
+    );
+    if (lockedUntil) {
+      this.logger.error(
+        { adminId: admin.id, lockedUntil },
+        `Account locked after ${attempts} failed attempts`,
+      );
+    }
   }
 
   private generateBackupCodes(): string[] {
