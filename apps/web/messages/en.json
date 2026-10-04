@@ -1,9 +1,56 @@
 {
+  "Metadata": {
+    "title": "Enrique Plaza — Paintings",
+    "description": "Paintings by Enrique Plaza: wolves, crows, fairy tales and quiet, watchful faces."
+  },
   "Nav": {
-    "gallery": "Gallery",
-    "about": "About"
+    "works": "Works",
+    "about": "About",
+    "skipToContent": "Skip to content",
+    "language": "Language",
+    "home": "Enrique Plaza, home"
   },
   "Home": {
-    "title": "Welcome"
+    "eyebrow": "Paintings",
+    "intro": "Wolves, crows, fairy tales and quiet, watchful faces.",
+    "viewWorks": "View the works",
+    "about": "About the artist",
+    "featured": "Featured",
+    "selected": "Selected works",
+    "viewAll": "View all works",
+    "collectionTitle": "The collection",
+    "collectionCount": "{count, plural, one {# painting} other {# paintings}}",
+    "collectionText": "Every piece is an original, one of a kind.",
+    "explore": "Explore the collection"
+  },
+  "Works": {
+    "title": "Works",
+    "intro": "Original paintings, one of a kind.",
+    "count": "{count, plural, one {# work} other {# works}}",
+    "empty": "No works to show yet."
+  },
+  "Work": {
+    "back": "All works",
+    "details": "Details",
+    "medium": "Medium",
+    "dimensions": "Dimensions",
+    "year": "Year",
+    "original": "Original, one of a kind",
+    "previous": "Previous",
+    "next": "Next",
+    "more": "More works"
+  },
+  "Status": {
+    "sold": "Sold",
+    "reserved": "Reserved"
+  },
+  "Footer": {
+    "rights": "© {year} Enrique Plaza. All rights reserved.",
+    "pages": "Information"
+  },
+  "NotFound": {
+    "title": "Nothing here",
+    "text": "This page doesn't exist, or the work is no longer on display.",
+    "home": "Back to the home page"
   }
 }

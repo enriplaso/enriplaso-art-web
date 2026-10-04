@@ -64,9 +64,14 @@ npx prisma generate                  # generate the typed client
 SEED_ADMIN_EMAIL=you@example.com SEED_ADMIN_PASSWORD=choose-one npm run prisma:seed  # creates the one admin account
 npm run start:dev
 
+# Optional: load a batch of photographed works (see "Importing artworks" below)
+IMPORT_ADMIN_EMAIL=you@example.com IMPORT_ADMIN_PASSWORD=... npm run import:artworks -- <folder>
+
 # Frontend (separate terminal, from apps/web — copy .env.local.example to .env.local first)
-npm run dev
+npm run dev                          # http://localhost:3000
 ```
+
+**Importing artworks**: until the admin UI exists, [import-artworks.ts](apps/api/scripts/import-artworks.ts) loads a folder of images through the running API: the same create, upload and publish endpoints the admin UI will call, so validation and image storage behave exactly as they would for a hand-entered piece. The folder holds the images plus a `manifest.json` (`slug`, `title`, `image`, optional `altText`, `medium`, `yearCreated`, `widthCm`, `heightCm`). Each entry is created as a draft, gets its image as the primary one (with the alt text in the default locale), and is then published. Re-running skips slugs that already exist. Prices are imported as 0 because the API requires one and they aren't shown while `SHOP_ENABLED` is off; set real prices before enabling the shop. The admin account used must not have 2FA enabled. The images themselves are content, not code, so they live outside the repository.
 `docker-compose.yml` at the repo root runs a single `postgres:16-alpine` container for local development only — it is not a production database setup (see [Open questions](#open-questions) for managed hosting). `npm install`, `prisma generate`, both apps' builds/lints/tests, and the full auth + health-check flow have all been verified against a real running server and database as of this scaffold.
 
 ### Backend architecture
@@ -379,7 +384,7 @@ Notes on the diagram:
 
 ### Portfolio (always on)
 - FR1: List artworks in a gallery view, with images, title, medium, style, dimensions, year. The public portfolio shows `published`, `reserved` and `sold` pieces: sold works stay visible (the frontend marks them by `status`) instead of vanishing the moment they sell, and reserved ones stay so a piece doesn't flicker out of the gallery mid-checkout. Drafts and archived pieces are admin-only. This also applies to `GET /products/:slug` and search, and is verified against the real database in [products-admin.e2e-spec.ts](apps/api/test/e2e/products-admin.e2e-spec.ts). Single-artist site — no per-artwork artist attribution needed; artist bio/info is a site-wide "About" page, not part of the product data.
-- FR2: Artwork detail page per product.
+- FR2: Artwork detail page per product. Implemented — see [Frontend](#frontend).
 - FR3: Browse/filter by category and tags, plus keyword search (`?search=`) across title, medium, style, and description. Implemented — see [Search](#search).
 - FR4: No price or purchase affordance visible while `SHOP_ENABLED = false`. API side implemented — see [Feature flag](#feature-flag-shop_enabled).
 
@@ -396,6 +401,7 @@ Notes on the diagram:
 ### Admin
 - FR13: Single admin login (`admins` table — no multi-role permissions needed). Implemented — see [Admin authentication](#admin-authentication).
 - FR14: CRUD for categories, products, and product images (manage drafts before publishing). Implemented — see [Image storage](#image-storage) for upload/delete.
+  - **Publishing**: a new product always starts as a `draft`. `PATCH /products/:id { "status": "published" }` publishes it. An admin can set `draft`, `published`, `sold` (for a piece sold outside the site) or `archived`. `reserved` is refused with a `400`: only checkout may reserve a piece (FR8), because it also sets `reserved_until`, and a hand-set reservation would have no expiry for FR9's job to release. Verified in [products-admin.e2e-spec.ts](apps/api/test/e2e/products-admin.e2e-spec.ts).
   - **Admin reads** live under `/admin/products` (`AdminAuthGuard` on the whole controller). `GET /admin/products` lists every status, with an optional `?status=` filter plus the same category/tag/search/pagination as the public list. `GET /admin/products/:id` returns a single product of any status, with every locale's description and alt text rather than one resolved translation, since an editor needs to see all of them, including the missing ones. It's a separate `/admin` prefix rather than `/products/admin`, which would make a product slugged "admin" unreachable behind `/products/:slug`.
   - **Product write errors**: an unknown locale code is a `400` naming it, checked before writing. A duplicate slug or SKU is a `409` naming the field (from Postgres's own constraint metadata). An unknown `categoryId` is a `400`. Before this, all three surfaced as bare `500`s. `update` also runs its translation upserts and the product update in one transaction: a rejected update (e.g. a duplicate slug) used to leave its translation changes committed anyway. All of this is verified against the real database in [products-admin.e2e-spec.ts](apps/api/test/e2e/products-admin.e2e-spec.ts).
   - **Categories**: a new category must include a default-locale translation (so the fallback always has a name to show); moving a category under itself or one of its own descendants is rejected; deleting a category leaves its products and subcategories in place, with no category / at the top level (`ON DELETE SET NULL`), verified against the real database in [categories.e2e-spec.ts](apps/api/test/e2e/categories.e2e-spec.ts).
@@ -422,6 +428,32 @@ Notes on the diagram:
 - FR24: Admin can approve/reject a return request, mark it received, and record the physical item's disposition (relisted vs. archived as damaged).
 - FR25: Approving a return issues a refund via the payment provider and updates `payments.status` (`refunded`/`partially_refunded`) and `orders.status` (`refunded`) accordingly.
 - FR26: A relisted returned item goes back to `products.status = 'published'`; a damaged one goes to `'archived'` rather than being resold.
+
+## Frontend
+
+`apps/web` is the public site: Next.js App Router, every route under a locale prefix (`/en`, `/es`, `/de`, `/fr`).
+
+| Route | What it shows |
+|---|---|
+| `/[locale]` | Landing page: the name set large beside one featured painting (`HERO_SLUG` in [site.ts](apps/web/src/lib/site.ts), falling back to the newest work), a slowly drifting strip of every painting, six selected works, and the collection count. |
+| `/[locale]/works` | Every published, reserved and sold work in a masonry grid; each painting keeps its own proportions. Sold and reserved pieces carry a badge. |
+| `/[locale]/works/[slug]` | One work: large image, title, the details that are filled in (medium, dimensions, year), previous/next, and four more works. |
+| `/[locale]/[slug]` | A static page from the admin (About, Privacy…), rendered from Markdown. The header shows "About" once a page with the slug `about` exists; the footer lists every page. |
+
+**Design**: a dark, gallery-like ground (`--color-ink`) so the paintings' saturated colors carry the page, with a single accent taken from the work itself: the hot pink of *Cuervo rosa* and *Fumadora* (`--color-accent`). The type is Instrument Serif for display and Inter for text. The tokens live in [globals.css](apps/web/src/app/globals.css) (Tailwind v4 `@theme`). The favicon and app icons ([src/app](apps/web/src/app)) are a crop of *Cuervo rosa*.
+
+**Data and caching**: every API call happens in Server Components, through [lib/api.ts](apps/web/src/lib/api.ts), typed with the shared [response types](#api-response-types). Responses are cached and revalidated every 5 minutes (ISR), so a newly published work appears within minutes without a redeploy. The home and works pages are prerendered at build time, which means **`next build` needs the API running**. Artwork and static pages render on their first visit and are cached from then on. If the API is briefly down, the header and footer degrade to no page links instead of taking the site down.
+
+**SEO**:
+- Every page sets a canonical URL plus `hreflang` alternates for all four locales and `x-default` (`localeAlternates()` in [site.ts](apps/web/src/lib/site.ts)), so the language versions count as one page rather than duplicates.
+- Artwork pages also emit Open Graph tags (shared links show the painting) and `VisualArtwork` structured data.
+- Static pages set `lang` to the locale actually served, which differs from the URL when a page fell back to the default language.
+
+**Privacy**: fonts are loaded with `next/font`, which downloads them at build time and serves them from the site itself, so visitors' browsers never contact Google. The site sets no cookies of its own besides next-intl's language preference, so it needs no consent banner yet (see [Compliance / consent](#compliance--consent)).
+
+**Accessibility**: a skip link to the content, alt text from the API on every image (the marquee's duplicate copy is hidden from screen readers and the tab order), visible focus outlines, and no marquee animation for visitors who prefer reduced motion.
+
+**Environment** ([.env.local.example](apps/web/.env.local.example)): `NEXT_PUBLIC_API_URL` (or a server-only `API_URL`), `NEXT_PUBLIC_SITE_URL` for absolute links, and `NEXT_PUBLIC_IMAGE_BASE_URL`, which must match the API's `STORAGE_PUBLIC_URL_BASE`: `next/image` only optimizes images from that host.
 
 ## Search
 

@@ -1,9 +1,56 @@
 {
+  "Metadata": {
+    "title": "Enrique Plaza — Peinture",
+    "description": "Peintures d'Enrique Plaza : loups, corbeaux, contes de fées et visages silencieux qui observent."
+  },
   "Nav": {
-    "gallery": "Galerie",
-    "about": "À propos"
+    "works": "Œuvres",
+    "about": "À propos",
+    "skipToContent": "Aller au contenu",
+    "language": "Langue",
+    "home": "Enrique Plaza, accueil"
   },
   "Home": {
-    "title": "Bienvenue"
+    "eyebrow": "Peinture",
+    "intro": "Loups, corbeaux, contes de fées et visages silencieux qui observent.",
+    "viewWorks": "Voir les œuvres",
+    "about": "À propos de l'artiste",
+    "featured": "À la une",
+    "selected": "Œuvres choisies",
+    "viewAll": "Voir toutes les œuvres",
+    "collectionTitle": "La collection",
+    "collectionCount": "{count, plural, one {# peinture} other {# peintures}}",
+    "collectionText": "Chaque pièce est un original, unique.",
+    "explore": "Explorer la collection"
+  },
+  "Works": {
+    "title": "Œuvres",
+    "intro": "Peintures originales, pièces uniques.",
+    "count": "{count, plural, one {# œuvre} other {# œuvres}}",
+    "empty": "Aucune œuvre à afficher pour le moment."
+  },
+  "Work": {
+    "back": "Toutes les œuvres",
+    "details": "Détails",
+    "medium": "Technique",
+    "dimensions": "Dimensions",
+    "year": "Année",
+    "original": "Original, pièce unique",
+    "previous": "Précédente",
+    "next": "Suivante",
+    "more": "Autres œuvres"
+  },
+  "Status": {
+    "sold": "Vendue",
+    "reserved": "Réservée"
+  },
+  "Footer": {
+    "rights": "© {year} Enrique Plaza. Tous droits réservés.",
+    "pages": "Informations"
+  },
+  "NotFound": {
+    "title": "Rien ici",
+    "text": "Cette page n'existe pas, ou l'œuvre n'est plus exposée.",
+    "home": "Retour à l'accueil"
   }
 }

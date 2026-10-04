@@ -1,12 +1,89 @@
-:root {
-  color-scheme: light dark;
+@import 'tailwindcss';
+
+/*
+ * A dark, gallery-like ground so the paintings' saturated pinks, teals and
+ * oranges carry the page. The one accent is the hot pink that recurs in the
+ * work itself (Cuervo rosa, Fumadora…).
+ */
+@theme {
+  --color-ink: #0c0b0b;
+  --color-ink-raised: #161414;
+  --color-line: #2a2626;
+  --color-paper: #f3efe8;
+  --color-muted: #9a938a;
+  --color-accent: #ff2e7e;
+
+  --font-display: var(--font-instrument-serif), ui-serif, Georgia, serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+
+  --animate-marquee: marquee 60s linear infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
 }
 
-body {
-  margin: 0;
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    sans-serif;
+@layer base {
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-ink font-sans text-paper antialiased;
+  }
+
+  ::selection {
+    @apply bg-accent text-ink;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-4 outline-accent;
+  }
+}
+
+/* Admin-written static pages (About, Privacy…), rendered from Markdown. */
+@layer components {
+  .markdown {
+    @apply text-lg leading-relaxed text-paper/85;
+  }
+  .markdown > * + * {
+    @apply mt-6;
+  }
+  .markdown h2 {
+    @apply mt-14 font-display text-4xl leading-tight text-paper;
+  }
+  .markdown h3 {
+    @apply mt-10 font-display text-2xl text-paper;
+  }
+  .markdown a {
+    @apply text-paper underline decoration-accent underline-offset-4 hover:text-accent;
+  }
+  .markdown ul {
+    @apply list-disc pl-6;
+  }
+  .markdown ol {
+    @apply list-decimal pl-6;
+  }
+  .markdown blockquote {
+    @apply border-l-2 border-accent pl-6 font-display text-2xl text-paper;
+  }
+  .markdown strong {
+    @apply font-semibold text-paper;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .animate-marquee {
+    animation: none;
+  }
 }

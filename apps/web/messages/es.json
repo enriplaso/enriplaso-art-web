@@ -1,9 +1,56 @@
 {
+  "Metadata": {
+    "title": "Enrique Plaza — Pintura",
+    "description": "Pinturas de Enrique Plaza: lobos, cuervos, cuentos de hadas y rostros callados que observan."
+  },
   "Nav": {
-    "gallery": "Galería",
-    "about": "Sobre mí"
+    "works": "Obra",
+    "about": "Sobre mí",
+    "skipToContent": "Saltar al contenido",
+    "language": "Idioma",
+    "home": "Enrique Plaza, inicio"
   },
   "Home": {
-    "title": "Bienvenido"
+    "eyebrow": "Pintura",
+    "intro": "Lobos, cuervos, cuentos de hadas y rostros callados que observan.",
+    "viewWorks": "Ver la obra",
+    "about": "Sobre el artista",
+    "featured": "Destacada",
+    "selected": "Obra seleccionada",
+    "viewAll": "Ver toda la obra",
+    "collectionTitle": "La colección",
+    "collectionCount": "{count, plural, one {# pintura} other {# pinturas}}",
+    "collectionText": "Cada pieza es original y única.",
+    "explore": "Explorar la colección"
+  },
+  "Works": {
+    "title": "Obra",
+    "intro": "Pinturas originales, piezas únicas.",
+    "count": "{count, plural, one {# obra} other {# obras}}",
+    "empty": "Todavía no hay obras que mostrar."
+  },
+  "Work": {
+    "back": "Toda la obra",
+    "details": "Detalles",
+    "medium": "Técnica",
+    "dimensions": "Medidas",
+    "year": "Año",
+    "original": "Original, pieza única",
+    "previous": "Anterior",
+    "next": "Siguiente",
+    "more": "Más obras"
+  },
+  "Status": {
+    "sold": "Vendida",
+    "reserved": "Reservada"
+  },
+  "Footer": {
+    "rights": "© {year} Enrique Plaza. Todos los derechos reservados.",
+    "pages": "Información"
+  },
+  "NotFound": {
+    "title": "Aquí no hay nada",
+    "text": "Esta página no existe, o la obra ya no está expuesta.",
+    "home": "Volver al inicio"
   }
 }

@@ -1,9 +1,56 @@
 {
+  "Metadata": {
+    "title": "Enrique Plaza — Malerei",
+    "description": "Gemälde von Enrique Plaza: Wölfe, Krähen, Märchen und stille, wachsame Gesichter."
+  },
   "Nav": {
-    "gallery": "Galerie",
-    "about": "Über mich"
+    "works": "Werke",
+    "about": "Über mich",
+    "skipToContent": "Zum Inhalt springen",
+    "language": "Sprache",
+    "home": "Enrique Plaza, Startseite"
   },
   "Home": {
-    "title": "Willkommen"
+    "eyebrow": "Malerei",
+    "intro": "Wölfe, Krähen, Märchen und stille, wachsame Gesichter.",
+    "viewWorks": "Zu den Werken",
+    "about": "Über den Künstler",
+    "featured": "Ausgewählt",
+    "selected": "Ausgewählte Werke",
+    "viewAll": "Alle Werke ansehen",
+    "collectionTitle": "Die Sammlung",
+    "collectionCount": "{count, plural, one {# Gemälde} other {# Gemälde}}",
+    "collectionText": "Jedes Werk ist ein Original, ein Unikat.",
+    "explore": "Sammlung entdecken"
+  },
+  "Works": {
+    "title": "Werke",
+    "intro": "Originalgemälde, jedes ein Unikat.",
+    "count": "{count, plural, one {# Werk} other {# Werke}}",
+    "empty": "Noch keine Werke vorhanden."
+  },
+  "Work": {
+    "back": "Alle Werke",
+    "details": "Details",
+    "medium": "Technik",
+    "dimensions": "Maße",
+    "year": "Jahr",
+    "original": "Original, Unikat",
+    "previous": "Vorheriges",
+    "next": "Nächstes",
+    "more": "Weitere Werke"
+  },
+  "Status": {
+    "sold": "Verkauft",
+    "reserved": "Reserviert"
+  },
+  "Footer": {
+    "rights": "© {year} Enrique Plaza. Alle Rechte vorbehalten.",
+    "pages": "Informationen"
+  },
+  "NotFound": {
+    "title": "Hier ist nichts",
+    "text": "Diese Seite existiert nicht, oder das Werk wird nicht mehr gezeigt.",
+    "home": "Zur Startseite"
   }
 }

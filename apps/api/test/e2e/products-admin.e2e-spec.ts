@@ -233,6 +233,44 @@ describe('Shop flag & admin product endpoints (e2e)', () => {
     });
   });
 
+  describe('publishing', () => {
+    it('publishes a draft, rejects setting reserved, and validates the id', async () => {
+      const created = await admin
+        .post('/products')
+        .send({
+          slug: `${SLUG_PREFIX}to-publish`,
+          title: 'To publish',
+          priceCents: 1,
+        })
+        .expect(201);
+      const { id, status } = created.body as ProductBody;
+      expect(status).toBe('draft');
+      await request(app.getHttpServer())
+        .get(`/products/${SLUG_PREFIX}to-publish`)
+        .expect(404);
+
+      await admin
+        .patch(`/products/${id}`)
+        .send({ status: 'published' })
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`/products/${SLUG_PREFIX}to-publish`)
+        .expect(200);
+
+      // Only checkout may reserve a piece.
+      await admin
+        .patch(`/products/${id}`)
+        .send({ status: 'reserved' })
+        .expect(400);
+
+      await admin
+        .patch('/products/not-a-uuid')
+        .send({ title: 'x' })
+        .expect(400);
+      await admin.delete('/products/not-a-uuid').expect(400);
+    });
+  });
+
   describe('product write errors', () => {
     it('returns 409 for a duplicate slug, 400 for unknown locale or category', async () => {
       const dup = await admin
