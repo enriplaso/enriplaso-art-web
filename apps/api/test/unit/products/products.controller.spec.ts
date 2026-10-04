@@ -5,7 +5,7 @@ import { ProductsService } from '../../../src/products/products.service';
 import { AdminAuthGuard } from '../../../src/auth/admin-auth.guard';
 
 interface MockProductsService {
-  findPublished: Mock;
+  findPublic: Mock;
   findBySlug: Mock;
   create: Mock;
   update: Mock;
@@ -18,7 +18,7 @@ describe('ProductsController', () => {
 
   beforeEach(async () => {
     service = {
-      findPublished: vi.fn(),
+      findPublic: vi.fn(),
       findBySlug: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
@@ -39,9 +39,9 @@ describe('ProductsController', () => {
     controller = module.get(ProductsController);
   });
 
-  it('findAll delegates to service.findPublished with the query', async () => {
+  it('findAll delegates to service.findPublic with the query', async () => {
     const query = { categorySlug: 'abstract' };
-    service.findPublished.mockResolvedValue({
+    service.findPublic.mockResolvedValue({
       data: [],
       page: 1,
       pageSize: 24,
@@ -50,7 +50,7 @@ describe('ProductsController', () => {
 
     const result = await controller.findAll(query);
 
-    expect(service.findPublished).toHaveBeenCalledWith(query);
+    expect(service.findPublic).toHaveBeenCalledWith(query);
     expect(result.total).toBe(0);
   });
 

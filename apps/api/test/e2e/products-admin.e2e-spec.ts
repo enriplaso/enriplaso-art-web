@@ -71,6 +71,22 @@ describe('Shop flag & admin product endpoints (e2e)', () => {
         },
       },
     });
+    await prisma.product.create({
+      data: {
+        slug: `${SLUG_PREFIX}sold`,
+        title: 'Sold piece',
+        priceCents: 30000n,
+        status: 'sold',
+      },
+    });
+    await prisma.product.create({
+      data: {
+        slug: `${SLUG_PREFIX}archived`,
+        title: 'Archived piece',
+        priceCents: 9000n,
+        status: 'archived',
+      },
+    });
   });
 
   afterEach(() => {
@@ -126,6 +142,29 @@ describe('Shop flag & admin product endpoints (e2e)', () => {
     });
   });
 
+  describe('public portfolio visibility', () => {
+    it('keeps sold pieces visible and marked, and hides drafts and archived ones', async () => {
+      const list = await request(app.getHttpServer())
+        .get('/products')
+        .query({ pageSize: 100 })
+        .expect(200);
+      const ours = (list.body as { data: ProductBody[] }).data
+        .filter((p) => p.slug.startsWith(SLUG_PREFIX))
+        .map((p) => p.status)
+        .sort();
+      expect(ours).toEqual(['published', 'sold']);
+
+      const sold = await request(app.getHttpServer())
+        .get(`/products/${SLUG_PREFIX}sold`)
+        .expect(200);
+      expect((sold.body as ProductBody).status).toBe('sold');
+
+      await request(app.getHttpServer())
+        .get(`/products/${SLUG_PREFIX}archived`)
+        .expect(404);
+    });
+  });
+
   describe('GET /admin/products', () => {
     it('requires an admin session', async () => {
       await request(app.getHttpServer()).get('/admin/products').expect(401);
@@ -144,7 +183,12 @@ describe('Shop flag & admin product endpoints (e2e)', () => {
       const ours = (all.body as { data: ProductBody[] }).data.filter((p) =>
         p.slug.startsWith(SLUG_PREFIX),
       );
-      expect(ours.map((p) => p.status).sort()).toEqual(['draft', 'published']);
+      expect(ours.map((p) => p.status).sort()).toEqual([
+        'archived',
+        'draft',
+        'published',
+        'sold',
+      ]);
       expect(ours.find((p) => p.status === 'draft')?.priceCents).toBe('12000');
 
       const drafts = await admin

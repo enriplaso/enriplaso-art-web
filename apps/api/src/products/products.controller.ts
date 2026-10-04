@@ -41,7 +41,7 @@ export class ProductsController {
 
   @Get()
   findAll(@Query() query: QueryProductsDto) {
-    return this.productsService.findPublished(query);
+    return this.productsService.findPublic(query);
   }
 
   @Get(':slug')

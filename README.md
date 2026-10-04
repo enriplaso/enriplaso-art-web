@@ -309,7 +309,7 @@ Notes on the diagram:
 ## Functional requirements
 
 ### Portfolio (always on)
-- FR1: List published artworks in a gallery view, with images, title, medium, style, dimensions, year. Single-artist site — no per-artwork artist attribution needed; artist bio/info is a site-wide "About" page, not part of the product data.
+- FR1: List artworks in a gallery view, with images, title, medium, style, dimensions, year. The public portfolio shows `published`, `reserved` and `sold` pieces: sold works stay visible (the frontend marks them by `status`) instead of vanishing the moment they sell, and reserved ones stay so a piece doesn't flicker out of the gallery mid-checkout. Drafts and archived pieces are admin-only. This also applies to `GET /products/:slug` and search, and is verified against the real database in [products-admin.e2e-spec.ts](apps/api/test/e2e/products-admin.e2e-spec.ts). Single-artist site — no per-artwork artist attribution needed; artist bio/info is a site-wide "About" page, not part of the product data.
 - FR2: Artwork detail page per product.
 - FR3: Browse/filter by category and tags, plus keyword search (`?search=`) across title, medium, style, and description. Implemented — see [Search](#search).
 - FR4: No price or purchase affordance visible while `SHOP_ENABLED = false`. API side implemented — see [Feature flag](#feature-flag-shop_enabled).
@@ -353,7 +353,7 @@ Notes on the diagram:
 
 ## Search
 
-`GET /products?search=` matches against `products.title`, `products.medium`, `products.style`, and the *current-locale* `product_translations.description` — see [products.service.ts](apps/api/src/products/products.service.ts). Draft/archived products never match, same as every other `findPublished` filter.
+`GET /products?search=` matches against `products.title`, `products.medium`, `products.style`, and the *current-locale* `product_translations.description` — see [products.service.ts](apps/api/src/products/products.service.ts). Search covers the same pieces as the rest of the public portfolio (published, reserved, sold); draft and archived products never match.
 
 This started as plain, case-insensitive substring matching (`ILIKE`) — the right amount of complexity for a catalog this small, since a sequential scan on a few hundred rows is low-single-digit milliseconds regardless of indexing. It's since been upgraded to also tolerate typos, via **pg_trgm**, once there was an actual reason to (this reverses an even earlier decision — `pg_trgm` had been removed from the schema entirely for being unneeded at a single-artist site's scale).
 

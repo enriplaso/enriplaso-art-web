@@ -37,6 +37,16 @@ type ProductWithRelations = Prisma.ProductGetPayload<{
 
 const DEFAULT_PAGE_SIZE = 24;
 
+// What the public portfolio shows. Sold pieces stay visible (marked by
+// `status`) rather than vanishing the moment they sell, and reserved ones
+// stay so a piece doesn't flicker out of the gallery mid-checkout. Drafts
+// and archived pieces are admin-only.
+const PUBLIC_STATUSES: ProductStatus[] = [
+  ProductStatus.published,
+  ProductStatus.reserved,
+  ProductStatus.sold,
+];
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -45,24 +55,20 @@ export class ProductsService {
     private readonly settings: SettingsService,
   ) {}
 
-  // Public: published only, and commerce fields (price, stock) only while
+  // Public: the portfolio, and commerce fields (price, stock) only while
   // the shop is enabled — README's "Feature flag: SHOP_ENABLED".
-  findPublished(query: QueryProductsDto) {
-    return this.list(
-      query,
-      ProductStatus.published,
-      this.settings.isShopEnabled(),
-    );
+  findPublic(query: QueryProductsDto) {
+    return this.list(query, PUBLIC_STATUSES, this.settings.isShopEnabled());
   }
 
   // Admin: every status unless filtered, commerce fields always included.
   findForAdmin(query: AdminQueryProductsDto) {
-    return this.list(query, query.status, true);
+    return this.list(query, query.status ? [query.status] : undefined, true);
   }
 
   private async list(
     query: QueryProductsDto,
-    status: ProductStatus | undefined,
+    statuses: ProductStatus[] | undefined,
     includeCommerce: boolean,
   ) {
     const page = query.page ?? 1;
@@ -74,7 +80,7 @@ export class ProductsService {
     // since ranking by fuzzy-match relevance needs raw SQL (Prisma has no
     // pg_trgm operators), which can't share a query with these filters.
     const where: Prisma.ProductWhereInput = {
-      ...(status && { status }),
+      ...(statuses && { status: { in: statuses } }),
       ...(query.categorySlug && { category: { slug: query.categorySlug } }),
       ...(query.tag && { tags: { has: query.tag } }),
     };
@@ -208,7 +214,7 @@ export class ProductsService {
       include: PRODUCT_WITH_RELATIONS,
     });
 
-    if (!product || product.status !== ProductStatus.published) {
+    if (!product || !PUBLIC_STATUSES.includes(product.status)) {
       throw new NotFoundException(`Product "${slug}" not found`);
     }
 

@@ -54,6 +54,10 @@ type MockSettings = {
 
 const SEEDED_LOCALES = ['en', 'es', 'de', 'fr'].map((code) => ({ code }));
 
+const PUBLIC_STATUS_FILTER = {
+  in: [ProductStatus.published, ProductStatus.reserved, ProductStatus.sold],
+};
+
 function createMockPrisma(): MockPrisma {
   const prisma = {
     product: {
@@ -89,7 +93,7 @@ function createMockPrisma(): MockPrisma {
 
   // Supports both the array form ($transaction([...])) and the interactive
   // callback form ($transaction(async (tx) => ...)) — addImage uses the
-  // latter, findPublished's search path uses the former. The callback gets
+  // latter, findPublic's search path uses the former. The callback gets
   // the mock itself as `tx`, so assertions against prisma.productImage.*
   // see the writes made inside the transaction.
   prisma.$transaction.mockImplementation((arg: unknown) =>
@@ -182,16 +186,16 @@ describe('ProductsService', () => {
     );
   });
 
-  describe('findPublished', () => {
-    it('filters by status=published and applies default pagination', async () => {
+  describe('findPublic', () => {
+    it('shows published, reserved and sold pieces, with default pagination', async () => {
       prisma.product.findMany.mockResolvedValue([buildProduct()]);
       prisma.product.count.mockResolvedValue(1);
 
-      const result = await service.findPublished({});
+      const result = await service.findPublic({});
 
       expect(prisma.product.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { status: ProductStatus.published },
+          where: { status: PUBLIC_STATUS_FILTER },
           skip: 0,
           take: 24,
         }),
@@ -207,7 +211,7 @@ describe('ProductsService', () => {
       prisma.product.findMany.mockResolvedValue([]);
       prisma.product.count.mockResolvedValue(0);
 
-      await service.findPublished({
+      await service.findPublic({
         categorySlug: 'abstract',
         tag: 'blue',
         page: 2,
@@ -217,7 +221,7 @@ describe('ProductsService', () => {
       expect(prisma.product.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
-            status: ProductStatus.published,
+            status: PUBLIC_STATUS_FILTER,
             category: { slug: 'abstract' },
             tags: { has: 'blue' },
           },
@@ -231,7 +235,7 @@ describe('ProductsService', () => {
       it('returns no results without querying the ranking SQL when nothing matches the structural filters', async () => {
         prisma.product.findMany.mockResolvedValue([]);
 
-        const result = await service.findPublished({ search: 'cat' });
+        const result = await service.findPublic({ search: 'cat' });
 
         expect(result).toEqual({ data: [], page: 1, pageSize: 24, total: 0 });
         expect(prisma.$queryRaw).not.toHaveBeenCalled();
@@ -243,14 +247,14 @@ describe('ProductsService', () => {
           .mockResolvedValueOnce([buildProduct()]); // final page fetch
         prisma.$queryRaw.mockResolvedValue([{ id: 'p1', relevance: 0.9 }]);
 
-        await service.findPublished({
+        await service.findPublic({
           search: 'cat',
           categorySlug: 'abstract',
         });
 
         expect(prisma.product.findMany).toHaveBeenNthCalledWith(1, {
           where: {
-            status: ProductStatus.published,
+            status: PUBLIC_STATUS_FILTER,
             category: { slug: 'abstract' },
           },
           select: { id: true },
@@ -269,7 +273,7 @@ describe('ProductsService', () => {
           { id: 'p2', relevance: 0.4 },
         ]);
 
-        const result = await service.findPublished({ search: 'cat' });
+        const result = await service.findPublic({ search: 'cat' });
 
         expect(result.data.map((p) => p.slug)).toEqual([
           'more-relevant',
@@ -289,7 +293,7 @@ describe('ProductsService', () => {
           ids.map((id, i) => ({ id, relevance: 1 - i * 0.1 })),
         );
 
-        const result = await service.findPublished({
+        const result = await service.findPublic({
           search: 'cat',
           page: 2,
           pageSize: 1,
@@ -304,7 +308,7 @@ describe('ProductsService', () => {
       prisma.product.findMany.mockResolvedValue([buildProduct()]);
       prisma.product.count.mockResolvedValue(1);
 
-      const result = await service.findPublished({ locale: 'es' });
+      const result = await service.findPublic({ locale: 'es' });
 
       expect(result.data).toHaveLength(1);
       expect(result.data[0]?.description).toBe('An English description.');
@@ -313,9 +317,7 @@ describe('ProductsService', () => {
     it('throws if no default locale is configured', async () => {
       prisma.locale.findFirst.mockResolvedValue(null);
 
-      await expect(service.findPublished({})).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(service.findPublic({})).rejects.toThrow(BadRequestException);
     });
 
     it('omits price and stock entirely while the shop is disabled', async () => {
@@ -323,7 +325,7 @@ describe('ProductsService', () => {
       prisma.product.findMany.mockResolvedValue([buildProduct()]);
       prisma.product.count.mockResolvedValue(1);
 
-      const result = await service.findPublished({});
+      const result = await service.findPublic({});
 
       const item = result.data[0]!;
       expect(item).not.toHaveProperty('priceCents');
@@ -339,7 +341,7 @@ describe('ProductsService', () => {
         .mockResolvedValueOnce([buildProduct()]);
       prisma.$queryRaw.mockResolvedValue([{ id: 'p1', relevance: 0.9 }]);
 
-      const result = await service.findPublished({ search: 'sunset' });
+      const result = await service.findPublic({ search: 'sunset' });
 
       expect(result.data[0]).not.toHaveProperty('priceCents');
     });
@@ -364,7 +366,9 @@ describe('ProductsService', () => {
       await service.findForAdmin({ status: ProductStatus.draft });
 
       expect(prisma.product.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { status: ProductStatus.draft } }),
+        expect.objectContaining({
+          where: { status: { in: [ProductStatus.draft] } },
+        }),
       );
     });
 
@@ -458,15 +462,27 @@ describe('ProductsService', () => {
       expect(result).not.toHaveProperty('priceCents');
     });
 
-    it('throws NotFoundException when the product is not published', async () => {
-      prisma.product.findUnique.mockResolvedValue(
-        buildProduct({ status: ProductStatus.draft }),
-      );
+    it.each([ProductStatus.draft, ProductStatus.archived])(
+      'throws NotFoundException for a %s product',
+      async (status) => {
+        prisma.product.findUnique.mockResolvedValue(buildProduct({ status }));
 
-      await expect(service.findBySlug('sunset-oil')).rejects.toThrow(
-        NotFoundException,
-      );
-    });
+        await expect(service.findBySlug('sunset-oil')).rejects.toThrow(
+          NotFoundException,
+        );
+      },
+    );
+
+    it.each([ProductStatus.sold, ProductStatus.reserved])(
+      'keeps a %s piece visible in the portfolio',
+      async (status) => {
+        prisma.product.findUnique.mockResolvedValue(buildProduct({ status }));
+
+        const result = await service.findBySlug('sunset-oil');
+
+        expect(result.status).toBe(status);
+      },
+    );
 
     it('picks the first image (by position) as primary when none is flagged isPrimary', async () => {
       prisma.product.findUnique.mockResolvedValue(
