@@ -3,6 +3,8 @@ import { routing } from '@/i18n/routing';
 
 export const SITE_NAME = 'Enrique Plaza';
 
+export const INSTAGRAM_URL = 'https://www.instagram.com/enriplaso/';
+
 // Absolute base for canonical URLs, hreflang links and Open Graph images.
 export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000';
 

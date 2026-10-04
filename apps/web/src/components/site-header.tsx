@@ -1,6 +1,7 @@
 import { useTranslations } from 'next-intl';
 import { Link } from '@/i18n/navigation';
 import { SITE_NAME } from '@/lib/site';
+import { InstagramLink } from './instagram-link';
 import { LocaleSwitcher } from './locale-switcher';
 
 export function SiteHeader({ hasAboutPage }: { hasAboutPage: boolean }) {
@@ -22,7 +23,7 @@ export function SiteHeader({ hasAboutPage }: { hasAboutPage: boolean }) {
         >
           {SITE_NAME}
         </Link>
-        <div className="flex items-center gap-6 sm:gap-10">
+        <div className="flex items-center gap-4 sm:gap-8">
           <nav aria-label={SITE_NAME}>
             <ul className="flex items-center gap-5 text-sm sm:gap-8">
               <li>
@@ -48,6 +49,7 @@ export function SiteHeader({ hasAboutPage }: { hasAboutPage: boolean }) {
           <div className="hidden sm:block">
             <LocaleSwitcher />
           </div>
+          <InstagramLink className="-mr-2" />
         </div>
       </div>
     </header>

@@ -2,6 +2,7 @@ import { useTranslations } from 'next-intl';
 import type { PageSummary } from '@enriplaso-art-web/api-types';
 import { Link } from '@/i18n/navigation';
 import { SITE_NAME } from '@/lib/site';
+import { InstagramLink } from './instagram-link';
 import { LocaleSwitcher } from './locale-switcher';
 
 // The page links come from GET /pages, so a page the admin adds (Privacy,
@@ -35,7 +36,10 @@ export function SiteFooter({ pages }: { pages: PageSummary[] }) {
               </ul>
             </nav>
           )}
-          <LocaleSwitcher />
+          <div className="flex items-center gap-6">
+            <LocaleSwitcher />
+            <InstagramLink />
+          </div>
           <p>{t('rights', { year: new Date().getFullYear() })}</p>
         </div>
       </div>

@@ -5,7 +5,7 @@ import { getTranslations, setRequestLocale } from 'next-intl/server';
 import type { Product } from '@enriplaso-art-web/api-types';
 import { Link } from '@/i18n/navigation';
 import { getProduct, getProducts } from '@/lib/api';
-import { localeAlternates, SITE_NAME } from '@/lib/site';
+import { INSTAGRAM_URL, localeAlternates, SITE_NAME } from '@/lib/site';
 import { ArtworkCard, artworkAlt } from '@/components/artwork-card';
 import { StatusBadge } from '@/components/status-badge';
 
@@ -91,7 +91,12 @@ export default async function WorkPage({ params }: Props) {
     artform: 'Painting',
     artMedium: work.medium ?? undefined,
     dateCreated: work.yearCreated ? String(work.yearCreated) : undefined,
-    creator: { '@type': 'Person', name: SITE_NAME },
+    creator: {
+      '@type': 'Person',
+      name: SITE_NAME,
+      alternateName: 'Enriplaso',
+      sameAs: [INSTAGRAM_URL],
+    },
   };
 
   return (
