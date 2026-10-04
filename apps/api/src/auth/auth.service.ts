@@ -10,6 +10,13 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
+import type {
+  AdminProfile,
+  AdminSummary,
+  SuccessResponse,
+  TotpConfirmResponse,
+  TotpSetupResponse,
+} from '@enriplaso-art-web/api-types';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   BACKUP_CODE_COUNT,
@@ -21,12 +28,8 @@ import {
 
 const TOTP_ISSUER = 'Art Shop Admin';
 
-export interface AdminSummary {
-  id: string;
-  email: string;
-  fullName: string | null;
-}
-
+// Internal: the tokens are set as cookies by AuthController and never
+// reach the response body (see LoginResponse in @enriplaso-art-web/api-types).
 type LoginResult =
   | { requiresTwoFactor: true; pendingToken: string }
   | { requiresTwoFactor: false; token: string; admin: AdminSummary };
@@ -94,7 +97,10 @@ export class AuthService {
     };
   }
 
-  async verifyTwoFactor(pendingToken: string, code: string) {
+  async verifyTwoFactor(
+    pendingToken: string,
+    code: string,
+  ): Promise<{ token: string; usedBackupCode: boolean; admin: AdminSummary }> {
     let payload: { sub: string; purpose?: string };
     try {
       payload = await this.jwtService.verifyAsync<{
@@ -178,7 +184,7 @@ export class AuthService {
     };
   }
 
-  async setupTotp(adminId: string) {
+  async setupTotp(adminId: string): Promise<TotpSetupResponse> {
     const admin = await this.prisma.admin.findUnique({
       where: { id: adminId },
     });
@@ -202,7 +208,10 @@ export class AuthService {
     return { secret, otpauthUrl, qrCodeDataUrl };
   }
 
-  async confirmTotp(adminId: string, code: string) {
+  async confirmTotp(
+    adminId: string,
+    code: string,
+  ): Promise<TotpConfirmResponse> {
     const admin = await this.prisma.admin.findUnique({
       where: { id: adminId },
     });
@@ -235,7 +244,7 @@ export class AuthService {
     return { backupCodes };
   }
 
-  async disableTotp(adminId: string) {
+  async disableTotp(adminId: string): Promise<SuccessResponse> {
     await this.prisma.admin.update({
       where: { id: adminId },
       data: { totpEnabled: false, totpSecret: null, backupCodes: [] },
@@ -246,7 +255,7 @@ export class AuthService {
     return { success: true };
   }
 
-  async getProfile(adminId: string) {
+  async getProfile(adminId: string): Promise<AdminProfile> {
     const admin = await this.prisma.admin.findUnique({
       where: { id: adminId },
     });

@@ -43,6 +43,8 @@ enriplaso-art-web/
 │       └── prisma/
 │           ├── schema.prisma          typed client definition
 │           └── migrations/0_init/     verbatim copy of art_shop_schema.sql
+├── packages/
+│   └── api-types/             API response types, shared by api and web (types only)
 └── package.json                root workspace config
 ```
 
@@ -91,6 +93,30 @@ npm run dev
 | `GET /health/ready` | Postgres, via `PrismaHealthIndicator.pingCheck()` | **Readiness**: should traffic be routed here right now? | Orchestrator **stops routing traffic** here, but leaves the process running. It recovers automatically — no restart — the moment Postgres is reachable again. |
 
 Verified by hand: stopping the `db` container makes `/health/ready` return `503` while `/health` stays `200`; restarting `db` brings `/health/ready` back to `200` on its own, with no app restart at any point. When this gets containerized, wire a Dockerfile `HEALTHCHECK` / Kubernetes `livenessProbe` to `/health` and a `readinessProbe` to `/health/ready` — never the reverse.
+
+### API response types
+
+Every API response shape is declared once, in [packages/api-types/index.d.ts](packages/api-types/index.d.ts). The API annotates its return types with these types, and the Next.js app imports the same ones (`import type { Product } from '@enriplaso-art-web/api-types'`). If a response changes without its type being updated, the API fails to compile. If the type changes, every frontend use of it is checked against the new shape.
+
+**Where types are written explicitly, and where they're inferred.** The rule is to annotate at the API boundary and let TypeScript infer everything inside it.
+- Annotated:
+  - each service method whose result a controller returns as-is (`findAll(): Promise<Category[]>`);
+  - each `toResponse()` mapper;
+  - controller methods that build the response themselves (`AuthController`, `SettingsController`).
+- Not annotated: private helpers, locals and callbacks. Writing types there adds noise without catching anything.
+
+**The types describe the JSON the client receives,** not the server's in-memory objects:
+- Timestamps are ISO strings (`IsoDateString`). The services call `.toISOString()` themselves, so the declared type is true on both ends rather than relying on `JSON.stringify` to turn a `Date` into a string.
+- `priceCents` is a decimal string, because the database column is a `BigInt` and JSON has no BigInt.
+- Dimensions (`widthCm`, …) are numbers. Prisma's `Decimal` would otherwise be serialized as a string. `Decimal(8,2)` is well within a JS number's exact range.
+
+**`null` versus optional fields:**
+- `field: T | null`: the field is always present, and `null` means "no value", e.g. a painting with no recorded year. That's the default for nullable columns.
+- `field?: T`: the field is left out entirely in some contexts. Today that's only the commerce fields (`priceCents`, `currency`, `quantityAvailable`) on public product responses while `SHOP_ENABLED` is off (`Product = ProductBase & Partial<ProductCommerce>`). Admin responses always include them (`ProductWithCommerce`).
+
+JSON has no `undefined`, so a field set to `undefined` would silently disappear from the response. That's why "no value" is always `null`.
+
+**Why it's a `.d.ts` package and not a `.ts` one:** a declaration file is types only. There's nothing to build, it's exempt from the API build's `rootDir: src`, and `import type` leaves no trace in either app's compiled output. A `.d.ts` file can't contain values, so runtime code (validation, constants) can't be put in it by accident. If shared runtime code is ever needed, it belongs in a separate, built package.
 
 ### Logging
 

@@ -1,0 +1,7 @@
+{
+  "name": "@enriplaso-art-web/api-types",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Response shapes of the REST API, shared by apps/api (which returns them) and apps/web (which consumes them). Types only, no runtime code.",
+  "types": "index.d.ts"
+}

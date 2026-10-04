@@ -8,6 +8,12 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { Prisma, ProductStatus } from '@prisma/client';
+import type {
+  AdminProduct,
+  Paginated,
+  Product,
+  ProductWithCommerce,
+} from '@enriplaso-art-web/api-types';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   assertLocalesExist,
@@ -36,6 +42,15 @@ type ProductWithRelations = Prisma.ProductGetPayload<{
   include: typeof PRODUCT_WITH_RELATIONS;
 }>;
 
+// Turns a database row into one list item, in the list's resolved locale.
+// Public and admin lists pass different ones (with or without prices), so
+// each gets its own precise item type.
+type ToItem<T> = (
+  product: ProductWithRelations,
+  locale: string,
+  defaultLocale: string,
+) => T;
+
 const DEFAULT_PAGE_SIZE = 24;
 
 // What the public portfolio shows. Sold pieces stay visible (marked by
@@ -63,20 +78,30 @@ export class ProductsService {
 
   // Public: the portfolio, and commerce fields (price, stock) only while
   // the shop is enabled — README's "Feature flag: SHOP_ENABLED".
-  findPublic(query: QueryProductsDto) {
-    return this.list(query, PUBLIC_STATUSES, this.settings.isShopEnabled());
+  findPublic(query: QueryProductsDto): Promise<Paginated<Product>> {
+    const includeCommerce = this.settings.isShopEnabled();
+    return this.list(query, PUBLIC_STATUSES, (p, locale, defaultLocale) =>
+      this.toResponse(p, locale, defaultLocale, includeCommerce),
+    );
   }
 
   // Admin: every status unless filtered, commerce fields always included.
-  findForAdmin(query: AdminQueryProductsDto) {
-    return this.list(query, query.status ? [query.status] : undefined, true);
+  findForAdmin(
+    query: AdminQueryProductsDto,
+  ): Promise<Paginated<ProductWithCommerce>> {
+    return this.list(
+      query,
+      query.status ? [query.status] : undefined,
+      (p, locale, defaultLocale) =>
+        this.toResponse(p, locale, defaultLocale, true),
+    );
   }
 
-  private async list(
+  private async list<T>(
     query: QueryProductsDto,
     statuses: ProductStatus[] | undefined,
-    includeCommerce: boolean,
-  ) {
+    toItem: ToItem<T>,
+  ): Promise<Paginated<T>> {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE;
     const defaultLocale = await this.getDefaultLocaleCode();
@@ -95,7 +120,7 @@ export class ProductsService {
       return this.findBySearch(where, query.search, page, pageSize, {
         locale,
         defaultLocale,
-        includeCommerce,
+        toItem,
       });
     }
 
@@ -111,9 +136,7 @@ export class ProductsService {
     ]);
 
     return {
-      data: products.map((p) =>
-        this.toResponse(p, locale, defaultLocale, includeCommerce),
-      ),
+      data: products.map((p) => toItem(p, locale, defaultLocale)),
       page,
       pageSize,
       total,
@@ -142,14 +165,14 @@ export class ProductsService {
    * and pagination happen in JS rather than pushing OFFSET/LIMIT into the
    * raw query — simpler, and fine at this size.
    */
-  private async findBySearch(
+  private async findBySearch<T>(
     structuralWhere: Prisma.ProductWhereInput,
     term: string,
     page: number,
     pageSize: number,
-    view: { locale: string; defaultLocale: string; includeCommerce: boolean },
-  ) {
-    const { locale, defaultLocale, includeCommerce } = view;
+    view: { locale: string; defaultLocale: string; toItem: ToItem<T> },
+  ): Promise<Paginated<T>> {
+    const { locale, defaultLocale, toItem } = view;
     const candidates = await this.prisma.product.findMany({
       where: structuralWhere,
       select: { id: true },
@@ -205,16 +228,14 @@ export class ProductsService {
       .filter((p): p is ProductWithRelations => p !== undefined);
 
     return {
-      data: ordered.map((p) =>
-        this.toResponse(p, locale, defaultLocale, includeCommerce),
-      ),
+      data: ordered.map((p) => toItem(p, locale, defaultLocale)),
       page,
       pageSize,
       total,
     };
   }
 
-  async findBySlug(slug: string, requestedLocale?: string) {
+  async findBySlug(slug: string, requestedLocale?: string): Promise<Product> {
     const product = await this.prisma.product.findUnique({
       where: { slug },
       include: PRODUCT_WITH_RELATIONS,
@@ -239,7 +260,7 @@ export class ProductsService {
    * translation — an editor needs to see all of them, including which
    * are missing.
    */
-  async findByIdForAdmin(id: string) {
+  async findByIdForAdmin(id: string): Promise<AdminProduct> {
     const product = await this.prisma.product.findUnique({
       where: { id },
       include: PRODUCT_WITH_RELATIONS,
@@ -270,7 +291,7 @@ export class ProductsService {
     };
   }
 
-  async create(dto: CreateProductDto) {
+  async create(dto: CreateProductDto): Promise<ProductWithCommerce> {
     this.assertUniqueItemQuantity(dto.isUnique, dto.quantityAvailable);
     const { translations, priceCents, ...rest } = dto;
     await assertLocalesExist(
@@ -308,7 +329,10 @@ export class ProductsService {
    * a rejected update (e.g. a duplicate slug → 409) doesn't leave the
    * translations half-applied.
    */
-  async update(id: string, dto: UpdateProductDto) {
+  async update(
+    id: string,
+    dto: UpdateProductDto,
+  ): Promise<ProductWithCommerce> {
     const existing = await this.findByIdOrThrow(id);
     this.assertUniqueItemQuantity(
       dto.isUnique ?? existing.isUnique,
@@ -377,7 +401,7 @@ export class ProductsService {
     productId: string,
     file: { buffer: Buffer; mimetype: string },
     dto: UploadProductImageDto,
-  ) {
+  ): Promise<ProductWithCommerce> {
     await this.findByIdOrThrow(productId);
     const defaultLocale = await this.getDefaultLocaleCode();
 
@@ -442,7 +466,7 @@ export class ProductsService {
     productId: string,
     imageId: string,
     file: { buffer: Buffer; mimetype: string },
-  ) {
+  ): Promise<ProductWithCommerce> {
     const existing = await this.prisma.productImage.findUnique({
       where: { id: imageId },
     });
@@ -496,7 +520,7 @@ export class ProductsService {
     productId: string,
     imageId: string,
     dto: UpdateProductImageDto,
-  ) {
+  ): Promise<ProductWithCommerce> {
     const image = await this.prisma.productImage.findUnique({
       where: { id: imageId },
     });
@@ -568,7 +592,7 @@ export class ProductsService {
    * after a delete would make the flag itself misleading going forward
    * (e.g. the next addImage({isPrimary: true}) would have nothing to demote).
    */
-  async removeImage(productId: string, imageId: string) {
+  async removeImage(productId: string, imageId: string): Promise<void> {
     const image = await this.prisma.productImage.findUnique({
       where: { id: imageId },
     });
@@ -611,7 +635,7 @@ export class ProductsService {
    * archives rather than removing the row (art_shop_schema.sql already
    * models 'archived' as a first-class product_status).
    */
-  async archive(id: string) {
+  async archive(id: string): Promise<void> {
     await this.findByIdOrThrow(id);
     await this.prisma.product.update({
       where: { id },
@@ -730,8 +754,20 @@ export class ProductsService {
     product: ProductWithRelations,
     locale: string,
     defaultLocale: string,
+    includeCommerce: true,
+  ): ProductWithCommerce;
+  private toResponse(
+    product: ProductWithRelations,
+    locale: string,
+    defaultLocale: string,
     includeCommerce: boolean,
-  ) {
+  ): Product;
+  private toResponse(
+    product: ProductWithRelations,
+    locale: string,
+    defaultLocale: string,
+    includeCommerce: boolean,
+  ): Product {
     const translation = pickTranslation(
       product.translations,
       locale,
@@ -753,10 +789,13 @@ export class ProductsService {
       medium: product.medium,
       style: product.style,
       yearCreated: product.yearCreated,
-      widthCm: product.widthCm,
-      heightCm: product.heightCm,
-      depthCm: product.depthCm,
-      weightKg: product.weightKg,
+      // Decimal(8,2) columns: well within a JS number's exact range, and a
+      // number is what the frontend wants (Decimal would serialize as a
+      // string).
+      widthCm: product.widthCm?.toNumber() ?? null,
+      heightCm: product.heightCm?.toNumber() ?? null,
+      depthCm: product.depthCm?.toNumber() ?? null,
+      weightKg: product.weightKg?.toNumber() ?? null,
       ...(includeCommerce && {
         priceCents: product.priceCents.toString(),
         currency: product.currency,

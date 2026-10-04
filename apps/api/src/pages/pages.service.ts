@@ -5,6 +5,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type {
+  AdminPage,
+  Page,
+  PageSummary,
+} from '@enriplaso-art-web/api-types';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   assertLocalesExist,
@@ -28,7 +33,7 @@ export class PagesService {
 
   // Slug + title only, for the site's footer/nav links. A handful of pages,
   // so no pagination.
-  async findAll(requestedLocale?: string) {
+  async findAll(requestedLocale?: string): Promise<PageSummary[]> {
     const defaultLocale = await getDefaultLocaleCode(this.prisma);
     const locale = requestedLocale ?? defaultLocale;
 
@@ -59,7 +64,7 @@ export class PagesService {
    * requested one when it fell back to the default (README NFR5) — the
    * frontend needs it for the page's `lang` attribute.
    */
-  async findBySlug(slug: string, requestedLocale?: string) {
+  async findBySlug(slug: string, requestedLocale?: string): Promise<Page> {
     const page = await this.prisma.page.findUnique({
       where: { slug },
       include: WITH_TRANSLATIONS,
@@ -82,11 +87,11 @@ export class PagesService {
       localeCode: translation.localeCode,
       title: translation.title,
       body: translation.body,
-      updatedAt: translation.updatedAt,
+      updatedAt: translation.updatedAt.toISOString(),
     };
   }
 
-  async findAllForAdmin() {
+  async findAllForAdmin(): Promise<AdminPage[]> {
     const pages = await this.prisma.page.findMany({
       include: WITH_TRANSLATIONS,
       orderBy: { slug: 'asc' },
@@ -95,7 +100,7 @@ export class PagesService {
   }
 
   // Every locale's translation, so the editor can see which are missing.
-  async findByIdForAdmin(id: string) {
+  async findByIdForAdmin(id: string): Promise<AdminPage> {
     const page = await this.prisma.page.findUnique({
       where: { id },
       include: WITH_TRANSLATIONS,
@@ -106,7 +111,7 @@ export class PagesService {
     return this.toAdminResponse(page);
   }
 
-  async create(dto: CreatePageDto) {
+  async create(dto: CreatePageDto): Promise<AdminPage> {
     const defaultLocale = await getDefaultLocaleCode(this.prisma);
     if (!dto.translations.some((t) => t.localeCode === defaultLocale)) {
       throw new BadRequestException(
@@ -144,7 +149,7 @@ export class PagesService {
    * half-applied. `updated_at` on an edited translation is bumped by the
    * set_updated_at() trigger.
    */
-  async update(id: string, dto: UpdatePageDto) {
+  async update(id: string, dto: UpdatePageDto): Promise<AdminPage> {
     await this.findByIdOrThrow(id);
     const { translations, slug } = dto;
     await assertLocalesExist(
@@ -182,7 +187,7 @@ export class PagesService {
   }
 
   // Hard delete; its translations go with it (ON DELETE CASCADE).
-  async remove(id: string) {
+  async remove(id: string): Promise<void> {
     await this.findByIdOrThrow(id);
     try {
       await this.prisma.page.delete({ where: { id } });
@@ -193,7 +198,7 @@ export class PagesService {
 
   // The default-locale translation can't be removed: it's what every other
   // locale falls back to, so without it the page would vanish for them.
-  async removeTranslation(id: string, localeCode: string) {
+  async removeTranslation(id: string, localeCode: string): Promise<void> {
     await this.findByIdOrThrow(id);
     const defaultLocale = await getDefaultLocaleCode(this.prisma);
     if (localeCode === defaultLocale) {
@@ -236,18 +241,18 @@ export class PagesService {
     throw error;
   }
 
-  private toAdminResponse(page: PageWithTranslations) {
+  private toAdminResponse(page: PageWithTranslations): AdminPage {
     return {
       id: page.id,
       slug: page.slug,
-      createdAt: page.createdAt,
+      createdAt: page.createdAt.toISOString(),
       translations: [...page.translations]
         .sort((a, b) => a.localeCode.localeCompare(b.localeCode))
         .map((t) => ({
           localeCode: t.localeCode,
           title: t.title,
           body: t.body,
-          updatedAt: t.updatedAt,
+          updatedAt: t.updatedAt.toISOString(),
         })),
     };
   }

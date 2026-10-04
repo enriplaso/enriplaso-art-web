@@ -10,6 +10,14 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Response, Request } from 'express';
+import type {
+  AdminProfile,
+  LoginResponse,
+  SuccessResponse,
+  TotpConfirmResponse,
+  TotpSetupResponse,
+  VerifyTwoFactorResponse,
+} from '@enriplaso-art-web/api-types';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { TotpCodeDto } from './dto/totp-code.dto';
@@ -35,7 +43,7 @@ export class AuthController {
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) res: Response,
-  ) {
+  ): Promise<LoginResponse> {
     const result = await this.authService.login(dto.email, dto.password);
 
     if (result.requiresTwoFactor) {
@@ -50,7 +58,7 @@ export class AuthController {
       ...getAuthCookieOptions(),
       maxAge: ACCESS_TOKEN_MAX_AGE_MS,
     });
-    return { admin: result.admin };
+    return { requiresTwoFactor: false, admin: result.admin };
   }
 
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
@@ -59,7 +67,7 @@ export class AuthController {
     @Body() dto: TotpCodeDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ) {
+  ): Promise<VerifyTwoFactorResponse> {
     const pendingToken = req.cookies?.[PENDING_2FA_TOKEN_COOKIE] as
       string | undefined;
     if (!pendingToken) {
@@ -81,32 +89,35 @@ export class AuthController {
   }
 
   @Post('logout')
-  logout(@Res({ passthrough: true }) res: Response) {
+  logout(@Res({ passthrough: true }) res: Response): SuccessResponse {
     res.clearCookie(ACCESS_TOKEN_COOKIE, getAuthCookieOptions());
     return { success: true };
   }
 
   @Get('me')
   @UseGuards(AdminAuthGuard)
-  me(@Req() req: Request) {
+  me(@Req() req: Request): Promise<AdminProfile> {
     return this.authService.getProfile(req.admin!.sub);
   }
 
   @Post('2fa/setup')
   @UseGuards(AdminAuthGuard)
-  setupTwoFactor(@Req() req: Request) {
+  setupTwoFactor(@Req() req: Request): Promise<TotpSetupResponse> {
     return this.authService.setupTotp(req.admin!.sub);
   }
 
   @Post('2fa/confirm')
   @UseGuards(AdminAuthGuard)
-  confirmTwoFactor(@Req() req: Request, @Body() dto: TotpCodeDto) {
+  confirmTwoFactor(
+    @Req() req: Request,
+    @Body() dto: TotpCodeDto,
+  ): Promise<TotpConfirmResponse> {
     return this.authService.confirmTotp(req.admin!.sub, dto.code);
   }
 
   @Post('2fa/disable')
   @UseGuards(AdminAuthGuard)
-  disableTwoFactor(@Req() req: Request) {
+  disableTwoFactor(@Req() req: Request): Promise<SuccessResponse> {
     return this.authService.disableTotp(req.admin!.sub);
   }
 }

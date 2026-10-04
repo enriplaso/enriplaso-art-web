@@ -6,7 +6,8 @@
     "node": ">=20"
   },
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
     "dev:web": "npm run dev --workspace apps/web",

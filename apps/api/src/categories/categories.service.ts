@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type { Category } from '@enriplaso-art-web/api-types';
 import { PrismaService } from '../prisma/prisma.service';
 import { getDefaultLocaleCode, pickTranslation } from '../i18n/locale.utils';
 import { CreateCategoryDto } from './dto/create-category.dto';
@@ -25,7 +26,7 @@ export class CategoriesService {
 
   // Flat list with parentId — the frontend builds the tree. The catalog is
   // small (<200 pieces, a handful of categories), so no pagination.
-  async findAll(requestedLocale?: string) {
+  async findAll(requestedLocale?: string): Promise<Category[]> {
     const defaultLocale = await getDefaultLocaleCode(this.prisma);
     const locale = requestedLocale ?? defaultLocale;
 
@@ -40,7 +41,7 @@ export class CategoriesService {
       );
   }
 
-  async findBySlug(slug: string, requestedLocale?: string) {
+  async findBySlug(slug: string, requestedLocale?: string): Promise<Category> {
     const category = await this.prisma.category.findUnique({
       where: { slug },
       include: WITH_TRANSLATIONS,
@@ -57,7 +58,7 @@ export class CategoriesService {
     );
   }
 
-  async create(dto: CreateCategoryDto) {
+  async create(dto: CreateCategoryDto): Promise<Category> {
     const defaultLocale = await getDefaultLocaleCode(this.prisma);
     this.assertHasDefaultTranslation(dto.translations, defaultLocale);
 
@@ -86,7 +87,7 @@ export class CategoriesService {
     }
   }
 
-  async update(id: string, dto: UpdateCategoryDto) {
+  async update(id: string, dto: UpdateCategoryDto): Promise<Category> {
     await this.findByIdOrThrow(id);
 
     if (dto.parentId) {
@@ -137,7 +138,7 @@ export class CategoriesService {
   // schema already handles the fallout — its products and child categories
   // are set to no category / top level (ON DELETE SET NULL), and its
   // translations are removed (ON DELETE CASCADE).
-  async remove(id: string) {
+  async remove(id: string): Promise<void> {
     await this.findByIdOrThrow(id);
     await this.prisma.category.delete({ where: { id } });
   }
@@ -196,7 +197,7 @@ export class CategoriesService {
     category: CategoryWithTranslations,
     locale: string,
     defaultLocale: string,
-  ) {
+  ): Category {
     const translation = pickTranslation(
       category.translations,
       locale,
