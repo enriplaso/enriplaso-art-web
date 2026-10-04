@@ -1,7 +1,12 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": "src"
+    "rootDir": "src",
+    // nest-cli's deleteOutDir wipes dist before every build, but with
+    // rootDir "src" the .tsbuildinfo lands outside dist and survives — so
+    // tsc decides nothing changed and emits nothing, leaving dist empty on
+    // every second build. Incremental buys nothing after a full wipe anyway.
+    "incremental": false
   },
   "exclude": [
     "node_modules",

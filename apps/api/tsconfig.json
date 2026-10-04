@@ -1,7 +1,15 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "module": "commonjs",
+    // node16 picks CJS vs ESM per file from package.json "type"; with no
+    // "type" field everything compiles to CommonJS, so relative imports
+    // stay extensionless (the .js-extension rule only applies to ESM).
+    "module": "node16",
+    "moduleResolution": "node16",
+    // TS 6 no longer auto-loads every @types package. List the ones that
+    // only add globals (Buffer/process; Express.Multer.File) and are never
+    // imported directly, so TS 5.9 and TS 6 see the same types.
+    "types": ["node", "multer"],
     "target": "ES2022",
     "lib": ["ES2022"],
     "declaration": true,
@@ -11,7 +19,6 @@
     "allowSyntheticDefaultImports": true,
     "sourceMap": true,
     "outDir": "./dist",
-    "baseUrl": "./",
     "incremental": true,
     "strictNullChecks": true,
     "noImplicitAny": true,

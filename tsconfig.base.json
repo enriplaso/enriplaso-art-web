@@ -2,15 +2,8 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022"],
-    // "node" (aka "node10") is deprecated in favor of "node16"/"nodenext",
-    // but those require explicit file extensions on every relative import
-    // (e.g. './app.module.js') — a real migration across the whole
-    // codebase, not worth it for a plain CommonJS Nest backend right now.
-    // ignoreDeprecations is TS's own sanctioned way to keep this working
-    // without the warning until that migration is actually worth doing.
-    "ignoreDeprecations": "5.0",
-    "module": "commonjs",
-    "moduleResolution": "node",
+    // module/moduleResolution are set per app: the API is a Node CommonJS
+    // package ("node16"), the web app is bundled by Next ("bundler").
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
