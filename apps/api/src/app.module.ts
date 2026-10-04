@@ -9,6 +9,7 @@ import { AuthModule } from './auth/auth.module';
 import { CategoriesModule } from './categories/categories.module';
 import { LocalesModule } from './locales/locales.module';
 import { SettingsModule } from './settings/settings.module';
+import { PagesModule } from './pages/pages.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { SettingsModule } from './settings/settings.module';
     SettingsModule,
     CategoriesModule,
     ProductsModule,
+    PagesModule,
     HealthModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

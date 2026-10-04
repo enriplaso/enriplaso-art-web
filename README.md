@@ -340,7 +340,10 @@ Notes on the diagram:
 ### Internationalization
 - FR19: Serve the site in multiple languages, seeded with English (default), Spanish, German, French — extensible without a migration (see [Internationalization](#internationalization-i18n)).
 - FR20: Admin can add/manage a product's and category's translated content per locale (extends FR14).
-- FR21: Admin can create/edit translated static pages (About Me, Privacy Policy, Terms, Shipping & Returns) per locale, without a code change or redeploy.
+- FR21: Admin can create/edit translated static pages (About Me, Privacy Policy, Terms, Shipping & Returns) per locale, without a code change or redeploy. Implemented, verified against the real database in [pages.e2e-spec.ts](apps/api/test/e2e/pages.e2e-spec.ts):
+  - **Public**: `GET /pages?locale=` lists `{ id, slug, title }` for footer/nav links. `GET /pages/:slug?locale=` returns `{ id, slug, localeCode, title, body, updatedAt }`, falling back to the default locale. `localeCode` is the locale actually served, so the frontend can set the page's `lang` correctly when it fell back.
+  - **Admin**: `GET /admin/pages` and `GET /admin/pages/:id` return every locale's translation. Writes are `POST /pages`, `PATCH /pages/:id` (translations are upserted in the same transaction as the slug change), `DELETE /pages/:id`, and `DELETE /pages/:id/translations/:localeCode`. Creating a page requires a default-locale translation, and that translation can't be deleted, because it's what every other locale falls back to.
+  - `body` is **Markdown**, rendered by the frontend. Don't render it as raw HTML: sanitize it, or render the Markdown without HTML passthrough.
 
 ### Admin notifications
 - FR22: Admin is notified by email and by a Telegram message when a product sells (see [Admin notifications](#admin-notifications)).
