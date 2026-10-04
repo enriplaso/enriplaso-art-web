@@ -19,7 +19,9 @@ import {
 } from '../storage/storage.service.interface';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { SettingsService } from '../settings/settings.service';
 import { QueryProductsDto } from './dto/query-products.dto';
+import { AdminQueryProductsDto } from './dto/admin-query-products.dto';
 import { UploadProductImageDto } from './dto/upload-product-image.dto';
 import { UpdateProductImageDto } from './dto/update-product-image.dto';
 
@@ -40,9 +42,29 @@ export class ProductsService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(STORAGE_SERVICE) private readonly storage: StorageService,
+    private readonly settings: SettingsService,
   ) {}
 
-  async findPublished(query: QueryProductsDto) {
+  // Public: published only, and commerce fields (price, stock) only while
+  // the shop is enabled — README's "Feature flag: SHOP_ENABLED".
+  findPublished(query: QueryProductsDto) {
+    return this.list(
+      query,
+      ProductStatus.published,
+      this.settings.isShopEnabled(),
+    );
+  }
+
+  // Admin: every status unless filtered, commerce fields always included.
+  findForAdmin(query: AdminQueryProductsDto) {
+    return this.list(query, query.status, true);
+  }
+
+  private async list(
+    query: QueryProductsDto,
+    status: ProductStatus | undefined,
+    includeCommerce: boolean,
+  ) {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE;
     const defaultLocale = await this.getDefaultLocaleCode();
@@ -52,20 +74,17 @@ export class ProductsService {
     // since ranking by fuzzy-match relevance needs raw SQL (Prisma has no
     // pg_trgm operators), which can't share a query with these filters.
     const where: Prisma.ProductWhereInput = {
-      status: ProductStatus.published,
+      ...(status && { status }),
       ...(query.categorySlug && { category: { slug: query.categorySlug } }),
       ...(query.tag && { tags: { has: query.tag } }),
     };
 
     if (query.search) {
-      return this.findPublishedBySearch(
-        where,
-        query.search,
+      return this.findBySearch(where, query.search, page, pageSize, {
         locale,
         defaultLocale,
-        page,
-        pageSize,
-      );
+        includeCommerce,
+      });
     }
 
     const [products, total] = await this.prisma.$transaction([
@@ -80,7 +99,9 @@ export class ProductsService {
     ]);
 
     return {
-      data: products.map((p) => this.toResponse(p, locale, defaultLocale)),
+      data: products.map((p) =>
+        this.toResponse(p, locale, defaultLocale, includeCommerce),
+      ),
       page,
       pageSize,
       total,
@@ -109,14 +130,14 @@ export class ProductsService {
    * and pagination happen in JS rather than pushing OFFSET/LIMIT into the
    * raw query — simpler, and fine at this size.
    */
-  private async findPublishedBySearch(
+  private async findBySearch(
     structuralWhere: Prisma.ProductWhereInput,
     term: string,
-    locale: string,
-    defaultLocale: string,
     page: number,
     pageSize: number,
+    view: { locale: string; defaultLocale: string; includeCommerce: boolean },
   ) {
+    const { locale, defaultLocale, includeCommerce } = view;
     const candidates = await this.prisma.product.findMany({
       where: structuralWhere,
       select: { id: true },
@@ -172,7 +193,9 @@ export class ProductsService {
       .filter((p): p is ProductWithRelations => p !== undefined);
 
     return {
-      data: ordered.map((p) => this.toResponse(p, locale, defaultLocale)),
+      data: ordered.map((p) =>
+        this.toResponse(p, locale, defaultLocale, includeCommerce),
+      ),
       page,
       pageSize,
       total,
@@ -194,33 +217,85 @@ export class ProductsService {
       product,
       requestedLocale ?? defaultLocale,
       defaultLocale,
+      this.settings.isShopEnabled(),
     );
+  }
+
+  /**
+   * Any status, for the admin edit form. Unlike the public shape (one
+   * resolved description/alt text), this returns every locale's
+   * translation — an editor needs to see all of them, including which
+   * are missing.
+   */
+  async findByIdForAdmin(id: string) {
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      include: PRODUCT_WITH_RELATIONS,
+    });
+    if (!product) {
+      throw new NotFoundException(`Product ${id} not found`);
+    }
+
+    const defaultLocale = await this.getDefaultLocaleCode();
+    const base = this.toResponse(product, defaultLocale, defaultLocale, true);
+    const imageTranslations = new Map(
+      product.images.map((img) => [img.id, img.translations]),
+    );
+
+    return {
+      ...base,
+      translations: product.translations.map((t) => ({
+        localeCode: t.localeCode,
+        description: t.description,
+      })),
+      images: base.images.map((img) => ({
+        ...img,
+        translations: (imageTranslations.get(img.id) ?? []).map((t) => ({
+          localeCode: t.localeCode,
+          altText: t.altText,
+        })),
+      })),
+    };
   }
 
   async create(dto: CreateProductDto) {
     this.assertUniqueItemQuantity(dto.isUnique, dto.quantityAvailable);
     const { translations, priceCents, ...rest } = dto;
+    await assertLocalesExist(
+      this.prisma,
+      (translations ?? []).map((t) => t.localeCode),
+    );
 
-    const product = await this.prisma.product.create({
-      data: {
-        ...rest,
-        priceCents: BigInt(priceCents),
-        translations: translations?.length
-          ? {
-              create: translations.map((t) => ({
-                localeCode: t.localeCode,
-                description: t.description,
-              })),
-            }
-          : undefined,
-      },
-      include: PRODUCT_WITH_RELATIONS,
-    });
+    let product: ProductWithRelations;
+    try {
+      product = await this.prisma.product.create({
+        data: {
+          ...rest,
+          priceCents: BigInt(priceCents),
+          translations: translations?.length
+            ? {
+                create: translations.map((t) => ({
+                  localeCode: t.localeCode,
+                  description: t.description,
+                })),
+              }
+            : undefined,
+        },
+        include: PRODUCT_WITH_RELATIONS,
+      });
+    } catch (error) {
+      this.rethrowProductWriteError(error);
+    }
 
     const defaultLocale = await this.getDefaultLocaleCode();
-    return this.toResponse(product, defaultLocale, defaultLocale);
+    return this.toResponse(product, defaultLocale, defaultLocale, true);
   }
 
+  /**
+   * Translation upserts and the product update share one transaction, so
+   * a rejected update (e.g. a duplicate slug → 409) doesn't leave the
+   * translations half-applied.
+   */
   async update(id: string, dto: UpdateProductDto) {
     const existing = await this.findByIdOrThrow(id);
     this.assertUniqueItemQuantity(
@@ -229,16 +304,18 @@ export class ProductsService {
     );
 
     const { translations, priceCents, ...rest } = dto;
+    await assertLocalesExist(
+      this.prisma,
+      (translations ?? []).map((t) => t.localeCode),
+    );
 
-    if (translations?.length) {
-      await this.prisma.$transaction(
-        translations.map((t) =>
-          this.prisma.productTranslation.upsert({
+    let product: ProductWithRelations;
+    try {
+      product = await this.prisma.$transaction(async (tx) => {
+        for (const t of translations ?? []) {
+          await tx.productTranslation.upsert({
             where: {
-              productId_localeCode: {
-                productId: id,
-                localeCode: t.localeCode,
-              },
+              productId_localeCode: { productId: id, localeCode: t.localeCode },
             },
             create: {
               productId: id,
@@ -246,22 +323,26 @@ export class ProductsService {
               description: t.description,
             },
             update: { description: t.description },
-          }),
-        ),
-      );
+          });
+        }
+
+        return tx.product.update({
+          where: { id },
+          data: {
+            ...rest,
+            ...(priceCents !== undefined && {
+              priceCents: BigInt(priceCents),
+            }),
+          },
+          include: PRODUCT_WITH_RELATIONS,
+        });
+      });
+    } catch (error) {
+      this.rethrowProductWriteError(error);
     }
 
-    const product = await this.prisma.product.update({
-      where: { id },
-      data: {
-        ...rest,
-        ...(priceCents !== undefined && { priceCents: BigInt(priceCents) }),
-      },
-      include: PRODUCT_WITH_RELATIONS,
-    });
-
     const defaultLocale = await this.getDefaultLocaleCode();
-    return this.toResponse(product, defaultLocale, defaultLocale);
+    return this.toResponse(product, defaultLocale, defaultLocale, true);
   }
 
   /**
@@ -329,7 +410,7 @@ export class ProductsService {
       where: { id: productId },
       include: PRODUCT_WITH_RELATIONS,
     });
-    return this.toResponse(product, defaultLocale, defaultLocale);
+    return this.toResponse(product, defaultLocale, defaultLocale, true);
   }
 
   /**
@@ -381,7 +462,7 @@ export class ProductsService {
       where: { id: productId },
       include: PRODUCT_WITH_RELATIONS,
     });
-    return this.toResponse(product, defaultLocale, defaultLocale);
+    return this.toResponse(product, defaultLocale, defaultLocale, true);
   }
 
   /**
@@ -448,7 +529,7 @@ export class ProductsService {
       where: { id: productId },
       include: PRODUCT_WITH_RELATIONS,
     });
-    return this.toResponse(product, defaultLocale, defaultLocale);
+    return this.toResponse(product, defaultLocale, defaultLocale, true);
   }
 
   /**
@@ -588,10 +669,34 @@ export class ProductsService {
     throw error;
   }
 
+  // Product create/update. Locale codes are validated before writing, so a
+  // foreign-key failure (P2003) can only be the categoryId.
+  private rethrowProductWriteError(error: unknown): never {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === 'P2002') {
+        const target = error.meta?.target;
+        const fields = Array.isArray(target) ? target.join(', ') : 'slug/SKU';
+        throw new ConflictException(
+          `A product with that ${fields} already exists`,
+        );
+      }
+      if (error.code === 'P2003') {
+        throw new BadRequestException('Unknown categoryId');
+      }
+    }
+    throw error;
+  }
+
+  /**
+   * `includeCommerce: false` omits price and stock entirely rather than
+   * nulling them — while the shop is disabled they must not be readable
+   * from the public API at all, not just hidden by the frontend.
+   */
   private toResponse(
     product: ProductWithRelations,
     locale: string,
     defaultLocale: string,
+    includeCommerce: boolean,
   ) {
     const translation = pickTranslation(
       product.translations,
@@ -618,10 +723,12 @@ export class ProductsService {
       heightCm: product.heightCm,
       depthCm: product.depthCm,
       weightKg: product.weightKg,
-      priceCents: product.priceCents.toString(),
-      currency: product.currency,
+      ...(includeCommerce && {
+        priceCents: product.priceCents.toString(),
+        currency: product.currency,
+        quantityAvailable: product.quantityAvailable,
+      }),
       isUnique: product.isUnique,
-      quantityAvailable: product.quantityAvailable,
       status: product.status,
       tags: product.tags,
       category: product.category

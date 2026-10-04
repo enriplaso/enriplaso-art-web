@@ -7,6 +7,7 @@ import {
 import { Prisma, ProductStatus } from '@prisma/client';
 import { PrismaService } from '../../../src/prisma/prisma.service';
 import { ProductsService } from '../../../src/products/products.service';
+import { SettingsService } from '../../../src/settings/settings.service';
 import { CreateProductDto } from '../../../src/products/dto/create-product.dto';
 import { UpdateProductDto } from '../../../src/products/dto/update-product.dto';
 
@@ -46,6 +47,12 @@ type MockStorage = {
   uploadPublicObject: Mock;
   deleteObjectByUrl: Mock;
 };
+
+type MockSettings = {
+  isShopEnabled: Mock;
+};
+
+const SEEDED_LOCALES = ['en', 'es', 'de', 'fr'].map((code) => ({ code }));
 
 function createMockPrisma(): MockPrisma {
   const prisma = {
@@ -160,12 +167,19 @@ describe('ProductsService', () => {
   let service: ProductsService;
   let prisma: MockPrisma;
   let storage: MockStorage;
+  let settings: MockSettings;
 
   beforeEach(() => {
     prisma = createMockPrisma();
     storage = createMockStorage();
+    settings = { isShopEnabled: vi.fn().mockReturnValue(true) };
     prisma.locale.findFirst.mockResolvedValue(DEFAULT_LOCALE);
-    service = new ProductsService(prisma as unknown as PrismaService, storage);
+    prisma.locale.findMany.mockResolvedValue(SEEDED_LOCALES);
+    service = new ProductsService(
+      prisma as unknown as PrismaService,
+      storage,
+      settings as unknown as SettingsService,
+    );
   });
 
   describe('findPublished', () => {
@@ -303,6 +317,118 @@ describe('ProductsService', () => {
         BadRequestException,
       );
     });
+
+    it('omits price and stock entirely while the shop is disabled', async () => {
+      settings.isShopEnabled.mockReturnValue(false);
+      prisma.product.findMany.mockResolvedValue([buildProduct()]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const result = await service.findPublished({});
+
+      const item = result.data[0]!;
+      expect(item).not.toHaveProperty('priceCents');
+      expect(item).not.toHaveProperty('currency');
+      expect(item).not.toHaveProperty('quantityAvailable');
+      expect(item.title).toBe('Sunset in Oil');
+    });
+
+    it('omits price from search results too while the shop is disabled', async () => {
+      settings.isShopEnabled.mockReturnValue(false);
+      prisma.product.findMany
+        .mockResolvedValueOnce([{ id: 'p1' }])
+        .mockResolvedValueOnce([buildProduct()]);
+      prisma.$queryRaw.mockResolvedValue([{ id: 'p1', relevance: 0.9 }]);
+
+      const result = await service.findPublished({ search: 'sunset' });
+
+      expect(result.data[0]).not.toHaveProperty('priceCents');
+    });
+  });
+
+  describe('findForAdmin', () => {
+    it('lists every status when no status filter is given', async () => {
+      prisma.product.findMany.mockResolvedValue([]);
+      prisma.product.count.mockResolvedValue(0);
+
+      await service.findForAdmin({});
+
+      expect(prisma.product.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: {} }),
+      );
+    });
+
+    it('filters by the requested status', async () => {
+      prisma.product.findMany.mockResolvedValue([]);
+      prisma.product.count.mockResolvedValue(0);
+
+      await service.findForAdmin({ status: ProductStatus.draft });
+
+      expect(prisma.product.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: ProductStatus.draft } }),
+      );
+    });
+
+    it('always includes price, even while the shop is disabled', async () => {
+      settings.isShopEnabled.mockReturnValue(false);
+      prisma.product.findMany.mockResolvedValue([
+        buildProduct({ status: ProductStatus.draft }),
+      ]);
+      prisma.product.count.mockResolvedValue(1);
+
+      const result = await service.findForAdmin({});
+
+      expect(result.data[0]?.priceCents).toBe('45000');
+    });
+  });
+
+  describe('findByIdForAdmin', () => {
+    it('throws NotFoundException when the product does not exist', async () => {
+      prisma.product.findUnique.mockResolvedValue(null);
+
+      await expect(service.findByIdForAdmin('missing')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('returns drafts with every locale, not just the resolved one, and price regardless of the flag', async () => {
+      settings.isShopEnabled.mockReturnValue(false);
+      prisma.product.findUnique.mockResolvedValue(
+        buildProduct({
+          status: ProductStatus.draft,
+          translations: [
+            { productId: 'p1', localeCode: 'en', description: 'English.' },
+            { productId: 'p1', localeCode: 'es', description: 'Español.' },
+          ],
+          images: [
+            {
+              id: 'img1',
+              productId: 'p1',
+              url: 'https://x/1.jpg',
+              position: 0,
+              isPrimary: true,
+              createdAt: new Date(),
+              translations: [
+                { imageId: 'img1', localeCode: 'en', altText: 'A cat' },
+                { imageId: 'img1', localeCode: 'es', altText: 'Un gato' },
+              ],
+            },
+          ],
+        }),
+      );
+
+      const result = await service.findByIdForAdmin('p1');
+
+      expect(result.status).toBe(ProductStatus.draft);
+      expect(result.priceCents).toBe('45000');
+      expect(result.translations).toEqual([
+        { localeCode: 'en', description: 'English.' },
+        { localeCode: 'es', description: 'Español.' },
+      ]);
+      expect(result.images[0]?.translations).toEqual([
+        { localeCode: 'en', altText: 'A cat' },
+        { localeCode: 'es', altText: 'Un gato' },
+      ]);
+    });
   });
 
   describe('findBySlug', () => {
@@ -321,6 +447,15 @@ describe('ProductsService', () => {
       await expect(service.findBySlug('missing')).rejects.toThrow(
         NotFoundException,
       );
+    });
+
+    it('omits price on the detail page while the shop is disabled', async () => {
+      settings.isShopEnabled.mockReturnValue(false);
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+
+      const result = await service.findBySlug('sunset-oil');
+
+      expect(result).not.toHaveProperty('priceCents');
     });
 
     it('throws NotFoundException when the product is not published', async () => {
@@ -460,6 +595,55 @@ describe('ProductsService', () => {
       };
       expect(callArg.data.translations).toBeUndefined();
     });
+
+    it('rejects an unknown locale code with a 400 before writing', async () => {
+      prisma.locale.findMany.mockResolvedValue([{ code: 'en' }]);
+
+      await expect(
+        service.create({
+          slug: 'x',
+          title: 'X',
+          priceCents: 100,
+          translations: [{ localeCode: 'xx', description: '???' }],
+        }),
+      ).rejects.toThrow('Unknown locale code(s): xx');
+      expect(prisma.product.create).not.toHaveBeenCalled();
+    });
+
+    it('maps a duplicate slug (P2002) to a 409 naming the field', async () => {
+      prisma.product.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on the fields: (`slug`)',
+          {
+            code: 'P2002',
+            clientVersion: '5.22.0',
+            meta: { target: ['slug'] },
+          },
+        ),
+      );
+
+      await expect(
+        service.create({ slug: 'taken', title: 'X', priceCents: 100 }),
+      ).rejects.toThrow('A product with that slug already exists');
+    });
+
+    it('maps an unknown categoryId (P2003) to a 400', async () => {
+      prisma.product.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Foreign key failed', {
+          code: 'P2003',
+          clientVersion: '5.22.0',
+        }),
+      );
+
+      await expect(
+        service.create({
+          slug: 'x',
+          title: 'X',
+          priceCents: 100,
+          categoryId: '00000000-0000-0000-0000-000000000000',
+        }),
+      ).rejects.toThrow('Unknown categoryId');
+    });
   });
 
   describe('update', () => {
@@ -522,6 +706,43 @@ describe('ProductsService', () => {
       };
       expect(callArg.data.priceCents).toBeUndefined();
       expect(callArg.data.title).toBe('New title');
+    });
+
+    it('rejects an unknown locale code with a 400 before writing', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      prisma.locale.findMany.mockResolvedValue([{ code: 'en' }]);
+
+      await expect(
+        service.update('p1', {
+          translations: [{ localeCode: 'xx', description: '???' }],
+        }),
+      ).rejects.toThrow('Unknown locale code(s): xx');
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('runs translation upserts and the product update in one transaction, mapping a duplicate slug to 409', async () => {
+      prisma.product.findUnique.mockResolvedValue(buildProduct());
+      prisma.product.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed on the fields: (`slug`)',
+          {
+            code: 'P2002',
+            clientVersion: '5.22.0',
+            meta: { target: ['slug'] },
+          },
+        ),
+      );
+
+      await expect(
+        service.update('p1', {
+          slug: 'taken',
+          translations: [{ localeCode: 'es', description: 'Nuevo.' }],
+        }),
+      ).rejects.toThrow(ConflictException);
+      // Both writes went through the same interactive transaction, so the
+      // real database rolls back the translation when the update fails.
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.productTranslation.upsert).toHaveBeenCalledTimes(1);
     });
   });
 

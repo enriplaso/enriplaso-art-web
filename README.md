@@ -150,6 +150,13 @@ Requirements for the flag:
 - Disabling the shop after it's been live must not delete or corrupt orders/payments history — it only hides the buying flow going forward.
 - Exact mechanism (env var, config table, LaunchDarkly-style service) is TBD — see [Open questions](#open-questions).
 
+**Current implementation (API side):** an env var, `SHOP_ENABLED=true|false`, read only through `SettingsService` ([settings.service.ts](apps/api/src/settings/settings.service.ts)), so moving to a config table later changes one class.
+- `GET /settings` (public) returns `{ shopEnabled }`. That's the single source of truth the README asks for: the Next.js app reads the flag from the API instead of keeping its own copy that could drift.
+- While it's off, public product responses (`GET /products`, `GET /products/:slug`, search included) **omit** `priceCents`, `currency` and `quantityAvailable` entirely. They aren't nulled, so prices can't be read from the API at all, not just hidden by the frontend.
+- Admin endpoints always include them, so the artist can price pieces before launching the shop.
+- Verified both directions against the real server in [products-admin.e2e-spec.ts](apps/api/test/e2e/products-admin.e2e-spec.ts).
+- Not done yet: rejecting cart/checkout/order endpoints, which don't exist yet. They should check `SettingsService` when they're built.
+
 ## Data model summary
 
 Full definitions in [art_shop_schema.sql](art_shop_schema.sql). PostgreSQL 14+.
@@ -305,7 +312,7 @@ Notes on the diagram:
 - FR1: List published artworks in a gallery view, with images, title, medium, style, dimensions, year. Single-artist site — no per-artwork artist attribution needed; artist bio/info is a site-wide "About" page, not part of the product data.
 - FR2: Artwork detail page per product.
 - FR3: Browse/filter by category and tags, plus keyword search (`?search=`) across title, medium, style, and description. Implemented — see [Search](#search).
-- FR4: No price or purchase affordance visible while `SHOP_ENABLED = false`.
+- FR4: No price or purchase affordance visible while `SHOP_ENABLED = false`. API side implemented — see [Feature flag](#feature-flag-shop_enabled).
 
 ### Shop (gated by `SHOP_ENABLED`)
 - FR5: Show price and availability (`status`, `quantity_available`) on artwork listing/detail when enabled.
@@ -319,7 +326,10 @@ Notes on the diagram:
 
 ### Admin
 - FR13: Single admin login (`admins` table — no multi-role permissions needed). Implemented — see [Admin authentication](#admin-authentication).
-- FR14: CRUD for categories, products, and product images (manage drafts before publishing). Implemented — see [Image storage](#image-storage) for upload/delete. Categories: a new category must include a default-locale translation (so the fallback always has a name to show); moving a category under itself or one of its own descendants is rejected; deleting a category leaves its products and subcategories in place, with no category / at the top level (`ON DELETE SET NULL`), verified against the real database in [categories.e2e-spec.ts](apps/api/test/e2e/categories.e2e-spec.ts).
+- FR14: CRUD for categories, products, and product images (manage drafts before publishing). Implemented — see [Image storage](#image-storage) for upload/delete.
+  - **Admin reads** live under `/admin/products` (`AdminAuthGuard` on the whole controller). `GET /admin/products` lists every status, with an optional `?status=` filter plus the same category/tag/search/pagination as the public list. `GET /admin/products/:id` returns a single product of any status, with every locale's description and alt text rather than one resolved translation, since an editor needs to see all of them, including the missing ones. It's a separate `/admin` prefix rather than `/products/admin`, which would make a product slugged "admin" unreachable behind `/products/:slug`.
+  - **Product write errors**: an unknown locale code is a `400` naming it, checked before writing. A duplicate slug or SKU is a `409` naming the field (from Postgres's own constraint metadata). An unknown `categoryId` is a `400`. Before this, all three surfaced as bare `500`s. `update` also runs its translation upserts and the product update in one transaction: a rejected update (e.g. a duplicate slug) used to leave its translation changes committed anyway. All of this is verified against the real database in [products-admin.e2e-spec.ts](apps/api/test/e2e/products-admin.e2e-spec.ts).
+  - **Categories**: a new category must include a default-locale translation (so the fallback always has a name to show); moving a category under itself or one of its own descendants is rejected; deleting a category leaves its products and subcategories in place, with no category / at the top level (`ON DELETE SET NULL`), verified against the real database in [categories.e2e-spec.ts](apps/api/test/e2e/categories.e2e-spec.ts).
 - FR15: View/manage orders and their status (`pending → paid → processing → shipped → delivered`, or `cancelled` / `refunded`).
 - FR16: Toggle `SHOP_ENABLED` (admin-facing control, if the flag mechanism supports runtime toggling rather than a deploy-time env var).
 
@@ -453,7 +463,7 @@ Other requirements:
 ## Open questions
 
 - [x] Frontend/backend stack — **Next.js (frontend) + NestJS (backend)**, decoupled. Hosting TBD.
-- [ ] Feature flag mechanism: simple env var vs. a flag admins can toggle at runtime from a settings UI.
+- [ ] Feature flag mechanism: simple env var vs. a flag admins can toggle at runtime from a settings UI. **For now an env var**, behind `SettingsService`, so switching to a runtime toggle later only touches that class. Deferred until checkout exists: a separate, DB-backed **"orders paused"** setting (with an optional resume date) the admin can toggle at runtime, e.g. for a vacation. It would keep prices visible and pause only buying, with a banner, rather than turning the whole site back into a portfolio the way `SHOP_ENABLED=false` does.
 - [ ] Which payment provider(s) to integrate first — Stripe assumed as default, confirm.
 - [ ] Shipping cost calculation: flat rate, per-item, or carrier API integration?
 - [ ] Tax handling (EU VAT / OSS) — manual entry vs. automated (e.g. Stripe Tax).

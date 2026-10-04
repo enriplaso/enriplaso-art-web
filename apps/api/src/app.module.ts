@@ -8,6 +8,7 @@ import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { CategoriesModule } from './categories/categories.module';
 import { LocalesModule } from './locales/locales.module';
+import { SettingsModule } from './settings/settings.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { LocalesModule } from './locales/locales.module';
     PrismaModule,
     AuthModule,
     LocalesModule,
+    SettingsModule,
     CategoriesModule,
     ProductsModule,
     HealthModule,

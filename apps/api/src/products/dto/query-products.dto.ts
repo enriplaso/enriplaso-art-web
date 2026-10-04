@@ -10,10 +10,8 @@ export class QueryProductsDto {
   @IsString()
   tag?: string;
 
-  // Plain case-insensitive substring match against title/medium/style/
-  // description — no index, no typo tolerance. Fine at this catalog's
-  // scale (README's "Search" section explains why, and what to reach for
-  // if that changes).
+  // Typo-tolerant match against title/medium/style/description, ranked by
+  // relevance (pg_trgm) — see README's "Search" section.
   @IsOptional()
   @IsString()
   search?: string;
