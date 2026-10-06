@@ -53,5 +53,10 @@
     "title": "Hier ist nichts",
     "text": "Diese Seite existiert nicht, oder das Werk wird nicht mehr gezeigt.",
     "home": "Zur Startseite"
+  },
+  "Lightbox": {
+    "label": "{title}, vergrößerte Bilder",
+    "open": "Vergrößert ansehen: {alt}",
+    "close": "Schließen"
   }
 }

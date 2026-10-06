@@ -53,5 +53,10 @@
     "title": "Nothing here",
     "text": "This page doesn't exist, or the work is no longer on display.",
     "home": "Back to the home page"
+  },
+  "Lightbox": {
+    "label": "{title}, enlarged images",
+    "open": "View larger: {alt}",
+    "close": "Close"
   }
 }

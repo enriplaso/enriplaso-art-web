@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import Image from 'next/image';
 import { notFound } from 'next/navigation';
 import { getTranslations, setRequestLocale } from 'next-intl/server';
 import type { Product } from '@enriplaso-art-web/api-types';
@@ -7,6 +6,7 @@ import { Link } from '@/i18n/navigation';
 import { getProduct, getProducts } from '@/lib/api';
 import { INSTAGRAM_URL, localeAlternates, SITE_NAME } from '@/lib/site';
 import { ArtworkCard, artworkAlt } from '@/components/artwork-card';
+import { ArtworkGallery } from '@/components/artwork-gallery';
 import { StatusBadge } from '@/components/status-badge';
 
 type Props = { params: Promise<{ locale: string; slug: string }> };
@@ -119,24 +119,17 @@ export default async function WorkPage({ params }: Props) {
 
       <div className="mt-8 grid gap-12 lg:grid-cols-12 lg:gap-16">
         <div className="lg:col-span-7 xl:col-span-8">
-          {work.images.length > 0 ? (
-            <ul className="flex flex-col gap-8">
-              {work.images.map((image, i) => (
-                <li key={image.id} className="relative flex justify-center bg-ink-raised">
-                  <Image
-                    src={image.url}
-                    alt={image.altText ?? work.title}
-                    width={1400}
-                    height={1960}
-                    priority={i === 0}
-                    sizes="(min-width: 1024px) 60vw, 100vw"
-                    className="h-auto max-h-[88svh] w-auto object-contain"
-                  />
-                  {i === 0 && <StatusBadge status={work.status} label={tStatus} />}
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          {work.images.length > 0 && (
+            <ArtworkGallery
+              title={work.title}
+              images={work.images.map((image) => ({
+                id: image.id,
+                url: image.url,
+                alt: image.altText ?? work.title,
+              }))}
+              badge={<StatusBadge status={work.status} label={tStatus} />}
+            />
+          )}
         </div>
 
         <div className="lg:col-span-5 xl:col-span-4">

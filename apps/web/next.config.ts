@@ -22,6 +22,9 @@ const nextConfig: NextConfig = {
       },
     ],
     formats: ['image/avif', 'image/webp'],
+    // 75 is the default; 90 is for the lightbox, where brushwork detail
+    // matters more than bytes. Next.js 16 requires listing every quality.
+    qualities: [75, 90],
   },
 };
 

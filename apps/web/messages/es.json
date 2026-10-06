@@ -53,5 +53,10 @@
     "title": "Aquí no hay nada",
     "text": "Esta página no existe, o la obra ya no está expuesta.",
     "home": "Volver al inicio"
+  },
+  "Lightbox": {
+    "label": "{title}, imágenes ampliadas",
+    "open": "Ver en grande: {alt}",
+    "close": "Cerrar"
   }
 }

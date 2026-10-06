@@ -53,5 +53,10 @@
     "title": "Rien ici",
     "text": "Cette page n'existe pas, ou l'œuvre n'est plus exposée.",
     "home": "Retour à l'accueil"
+  },
+  "Lightbox": {
+    "label": "{title}, images agrandies",
+    "open": "Agrandir : {alt}",
+    "close": "Fermer"
   }
 }
