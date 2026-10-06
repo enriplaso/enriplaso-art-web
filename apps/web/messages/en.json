@@ -58,5 +58,10 @@
     "label": "{title}, enlarged images",
     "open": "View larger: {alt}",
     "close": "Close"
+  },
+  "About": {
+    "eyebrow": "About",
+    "portraitAlt": "Black-and-white portrait of Enrique Plaza, smiling, by a lake.",
+    "instagram": "Follow @enriplaso on Instagram"
   }
 }

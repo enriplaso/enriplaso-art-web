@@ -58,5 +58,10 @@
     "label": "{title}, images agrandies",
     "open": "Agrandir : {alt}",
     "close": "Fermer"
+  },
+  "About": {
+    "eyebrow": "À propos",
+    "portraitAlt": "Portrait en noir et blanc d'Enrique Plaza, souriant, au bord d'un lac.",
+    "instagram": "Suivre @enriplaso sur Instagram"
   }
 }

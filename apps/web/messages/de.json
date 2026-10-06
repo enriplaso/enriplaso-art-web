@@ -58,5 +58,10 @@
     "label": "{title}, vergrößerte Bilder",
     "open": "Vergrößert ansehen: {alt}",
     "close": "Schließen"
+  },
+  "About": {
+    "eyebrow": "Über mich",
+    "portraitAlt": "Schwarzweißporträt von Enrique Plaza, lächelnd, an einem See.",
+    "instagram": "@enriplaso auf Instagram folgen"
   }
 }

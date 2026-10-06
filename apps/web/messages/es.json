@@ -58,5 +58,10 @@
     "label": "{title}, imágenes ampliadas",
     "open": "Ver en grande: {alt}",
     "close": "Cerrar"
+  },
+  "About": {
+    "eyebrow": "Sobre mí",
+    "portraitAlt": "Retrato en blanco y negro de Enrique Plaza, sonriendo, junto a un lago.",
+    "instagram": "Sigue a @enriplaso en Instagram"
   }
 }

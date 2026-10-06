@@ -438,9 +438,19 @@ Notes on the diagram:
 | `/[locale]` | Landing page: the name set large beside one featured painting (`HERO_SLUG` in [site.ts](apps/web/src/lib/site.ts), falling back to the newest work), a slowly drifting strip of every painting, six selected works, and the collection count. |
 | `/[locale]/works` | Every published, reserved and sold work in a masonry grid; each painting keeps its own proportions. Sold and reserved pieces carry a badge. |
 | `/[locale]/works/[slug]` | One work: the first image large and loaded first, then any other images as a two-column grid of thumbnails that start loading only once it has arrived (each fades in when ready), title, the details that are filled in (medium, dimensions, year), previous/next, and four more works. Any image opens a full-screen zoom view ([artwork-gallery.tsx](apps/web/src/components/artwork-gallery.tsx)), modeled on the reference gallery's: every image shown much larger than the screen, opened at the one clicked, to scroll through for the brushwork; clicking an image, ×, or Esc closes it. Pinch-zoom works on phones. |
-| `/[locale]/[slug]` | A static page from the admin (About, Privacy…), rendered from Markdown. The header shows "About" once a page with the slug `about` exists; the footer lists every page. |
+| `/[locale]/about` | The artist's portrait beside the text of the admin-edited `about` page (Markdown, translated), plus an Instagram link. The photo is a [static image](#static-images-vs-uploaded-images); the text stays editable. |
+| `/[locale]/[slug]` | A static page from the admin (Privacy, Terms…), rendered from Markdown. The header shows "About" once a page with the slug `about` exists; the footer lists every page. |
 
 **Design**: a dark, gallery-like ground (`--color-ink`) so the paintings' saturated colors carry the page, with a single accent taken from the work itself: the hot pink of *Cuervo rosa* and *Fumadora* (`--color-accent`). The type is Instrument Serif for display and Inter for text. The tokens live in [globals.css](apps/web/src/app/globals.css) (Tailwind v4 `@theme`). The favicon and app icons ([src/app](apps/web/src/app)) are a crop of *Cuervo rosa*.
+
+#### Static images vs. uploaded images
+
+| Kind | Where it lives | How it changes |
+|---|---|---|
+| **Content**: paintings and their detail shots | Object storage (MinIO / R2), uploaded through the API | From the admin (or the import script), no deploy |
+| **Design**: the artist's portrait, favicon/app icons | In the web app: [src/assets](apps/web/src/assets) (imported) and [src/app](apps/web/src/app) (icon files) | Replace the file and deploy |
+
+A design image is imported (`import portrait from '@/assets/enrique-plaza.jpg'`) rather than referenced by URL. Next.js then reads its dimensions and generates a tiny blurred preview at build time (`placeholder="blur"`), so the page never jumps while it loads. Prepare these files before adding them: resize to about 1600px on the long side and save them without their EXIF metadata. Phone photos carry camera details and sometimes the GPS location where they were taken.
 
 **Data and caching**: every API call happens in Server Components, through [lib/api.ts](apps/web/src/lib/api.ts), typed with the shared [response types](#api-response-types). Responses are cached and revalidated every 5 minutes (ISR), so a newly published work appears within minutes without a redeploy. The home and works pages are prerendered at build time, which means **`next build` needs the API running**. Artwork and static pages render on their first visit and are cached from then on. If the API is briefly down, the header and footer degrade to no page links instead of taking the site down.
 
